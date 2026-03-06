@@ -69,6 +69,6 @@ void uartFlush();
  * Debug Print (wie Serial.println)
  * @param message Debug-Nachricht
  */
-void uartDebugPrint(const String& message);
+void uartDebugPrint(const char* message);
 
 } // namespace HAL

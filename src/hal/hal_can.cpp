@@ -1,19 +1,15 @@
 #include "hal_can.h"
 
-FlexCAN CANbus(500000);  // default, Baud wird später konfiguriert
-CAN_message_t msg;
+// FlexCAN_T4 für Teensy 4.x — nutzt CAN1 (Pins 22/23)
+FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> CANbus;
 
 namespace HAL {
 
 bool canInit(uint32_t baud) {
-    try {
-        CANbus.begin();
-        Serial.println("[HAL_CAN] CAN Bus initialized at " + String(baud) + " baud");
-        return true;
-    } catch (...) {
-        Serial.println("[HAL_CAN] ERROR: Failed to initialize CAN bus");
-        return false;
-    }
+    CANbus.begin();
+    CANbus.setBaudRate(baud);
+    Serial.println("[HAL_CAN] CAN Bus initialized (FlexCAN_T4)");
+    return true;
 }
 
 bool canSend(uint32_t id, uint8_t* data, uint8_t len) {
@@ -21,14 +17,15 @@ bool canSend(uint32_t id, uint8_t* data, uint8_t len) {
     tx.id = id;
     tx.len = len;
     memcpy(tx.buf, data, len);
-    return CANbus.write(tx);
+    return (CANbus.write(tx) > 0);
 }
 
 bool canReceive(uint32_t &id, uint8_t* data, uint8_t &len) {
-    if (CANbus.read(msg)) {
-        id = msg.id;
-        len = msg.len;
-        memcpy(data, msg.buf, len);
+    CAN_message_t rx;
+    if (CANbus.read(rx)) {
+        id = rx.id;
+        len = rx.len;
+        memcpy(data, rx.buf, len);
         return true;
     }
     return false;

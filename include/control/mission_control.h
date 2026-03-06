@@ -6,93 +6,116 @@
 #include "services/telemetry_service.h"
 #include "control/safety_monitor.h"
 #include "control/flight_experiment_controller.h"
+#include "control/ground_test_controller.h"
+#include "control/preflight_test_controller.h"
+
+/**
+ * @brief Top-Level Mission States
+ * 
+ * Beschreibt den Betriebsmodus des OBC.
+ * MissionControl verwaltet NUR den Lifecycle — keine Flugphasen.
+ * Flugphasen werden vom FlightExperimentController erkannt und gesteuert.
+ */
+enum class MissionState {
+    STARTUP,           // Boot-Phase: HAL + Services initialisieren
+    PREFLIGHT_CHECK,   // Automatische System-Checks
+    STANDBY,           // Bereit: Warte auf Modus-Auswahl (F/T/H/S)
+    EXPERIMENT,        // Flug-Modus: FlightExperimentController steuert alles
+    TESTING,           // Test-Modus: PreflightTestController validiert Sequenzen
+    HARDWARE_TESTING,  // HW-Test-Modus: GroundTestController testet Einzelgeräte
+    SHUTDOWN,          // System herunterfahren
+};
+
+/**
+ * @brief Betriebsmodus — gewählt aus STANDBY
+ */
+enum class OperationMode {
+    NONE,
+    FLIGHT,
+    TESTING,
+    HARDWARE_TEST,
+};
 
 /**
  * @brief Zentrale Mission-Kontrolleinheit
- * Koordiniert alle Subsysteme und verwaltet Mission-Ablauf
+ * 
+ * Verantwortlich für:
+ * - Boot-Sequenz & Preflight-Checks
+ * - Modus-Auswahl (Flight / Testing / Hardware-Test)
+ * - Delegation an den richtigen Controller
+ * - Telemetrie & Safety-Überwachung
+ * - Shutdown & Emergency
+ * 
+ * NICHT verantwortlich für:
+ * - Flugphasen-Details (→ FlightExperimentController)
+ * - Hardware-Test-Details (→ GroundTestController)
+ * - Preflight-Test-Details (→ PreflightTestController)
  */
-
-enum class MissionState {
-    STARTUP,          // Boot-Phase
-    PREFLIGHT_CHECK,  // Vor-Flug-Prüfung
-    STANDBY,          // Wartend auf Start-Signal
-    ASCENT,           // Raketenstartphase
-    MICROGRAVITY,     // Schwerelosigkeits-Phase
-    DESCENT,          // Abstiegsphase
-    RECOVERY,         // Bergungsphase
-    SHUTDOWN,         // Herunterfahren
-};
-
 class MissionControl {
 public:
     MissionControl();
     ~MissionControl();
-    
-    /**
-     * @brief Initialisiert alle Subsysteme
-     * @return true wenn erfolgreich
-     */
-    bool init();
-    
-    /**
-     * @brief Hauptkontroll-Loop (sollte in loop() aufgerufen werden)
-     */
-    void run();
-    
-    /**
-     * @brief Gibt aktuellen Mission-Status zurück
-     */
-    MissionState getCurrentState() const;
-    
-    /**
-     * @brief Gibt Mission-Zeit zurück (seit Start)
-     */
-    uint32_t getMissionTime() const;
-    
-    /**
-     * @brief Führt Vor-Flug-Checks durch
-     * @return true wenn alle Checks erfolgreich
-     */
-    bool preflightCheck();
-    
-    /**
-     * @brief Startet Mission
-     */
-    void startMission();
 
-    /**
-     * @brief Prüft ob Start-Signal empfangen wurde
-     * @return true wenn Start-Signal empfangen wurde
-     */
-    bool isLiftOffSignal();
-    
-    /**
-     * @brief Stoppt Mission (Notfall)
-     */
+    bool init();
+    void run();
+
+    // State
+    MissionState getCurrentState() const;
+    OperationMode getOperationMode() const;
+    uint32_t getMissionTime() const;
+
+    // Modus-Auswahl (nur aus STANDBY)
+    bool selectMode(OperationMode mode);
+
+    // Shutdown & Emergency
+    void requestShutdown();
     void abortMission();
 
 private:
     MissionState current_state = MissionState::STARTUP;
-    uint32_t mission_start_time = 0;
+    OperationMode operation_mode = OperationMode::NONE;
+    uint32_t boot_time = 0;
+    uint32_t state_entry_time = 0;
     uint32_t last_telemetry_time = 0;
-    
-    // Subsystem-Instances
+    uint8_t preflight_retry_count = 0;
+
+    // Controller — je nach Modus aktiv
+    FlightExperimentController flight_controller;
+    GroundTestController ground_test_controller;
+    PreflightTestController preflight_test_controller;
+
+    // Services — immer aktiv
+    SafetyMonitor safety;
     DataCollectionService data_collector;
     TelemetryService telemetry;
-    SafetyMonitor safety;
-    FlightExperimentController experiment;
-    
+
     // Telemetrie-Buffer
     TelemetryData last_telemetry = {};
     char telemetry_buffer[256];
-    
-    static constexpr uint32_t TELEMETRY_INTERVAL = 100;  // 100ms = 10Hz
-    
-    // Flugphasen-Erkennung
-    bool detectApogee();
-    bool detectDescent();
-    bool detectLanding();
-    
-    void onStateChange(MissionState new_state);
-    void printMissionStatus();
+
+    static constexpr uint32_t TELEMETRY_INTERVAL = 100;  // 10 Hz
+    static constexpr uint32_t BOOT_DELAY = 3000;          // 3s Boot
+    static constexpr uint8_t  MAX_PREFLIGHT_RETRIES = 3;
+
+    // State-Handler
+    void handleStartup();
+    void handlePreflightCheck();
+    void handleStandby();
+    void handleExperiment();
+    void handleTesting();
+    void handleHardwareTesting();
+    void handleShutdown();
+
+    // Preflight
+    bool runPreflightChecks();
+
+    // Telemetrie (in allen aktiven Modi)
+    void collectAndSendTelemetry();
+
+    // Kommando-Parsing (Serial)
+    void checkForCommands();
+
+    // State-Transition
+    void transitionTo(MissionState new_state);
+    const char* stateToString(MissionState state) const;
 };

@@ -7,17 +7,13 @@ namespace HAL {
 static TwoWire* i2cBus = &Wire;
 
 bool i2cInit() {
-    try {
-        // Starte I2C auf definierten Pins
-        i2cBus->begin();
-        i2cBus->setClock(HAL_I2C_FREQ);
-        
-        Serial.println("[HAL_I2C] I2C Bus initialized at " + String(HAL_I2C_FREQ) + " Hz");
-        return true;
-    } catch (...) {
-        Serial.println("[HAL_I2C] ERROR: Failed to initialize I2C bus");
-        return false;
-    }
+    i2cBus->begin();
+    i2cBus->setClock(HAL_I2C_FREQ);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "[HAL_I2C] I2C Bus initialized at %u Hz", HAL_I2C_FREQ);
+    Serial.println(buf);
+    return true;
 }
 
 bool i2cWrite(uint8_t address, const uint8_t* data, uint8_t len) {
@@ -86,7 +82,9 @@ uint8_t i2cScan() {
         }
     }
 
-    Serial.println("[HAL_I2C] Scan complete. Found " + String(count) + " devices");
+    Serial.print("[HAL_I2C] Scan complete. Found ");
+    Serial.print(count);
+    Serial.println(" devices");
     return count;
 }
 

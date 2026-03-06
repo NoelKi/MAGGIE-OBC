@@ -21,9 +21,12 @@ void setup() {
 }
 
 void loop() {
-    if (g_system) {
-        g_system->run();
-    } else {
-        delay(100);
-    }
+    // if (g_system) {
+    //     g_system->run();
+    // } else {
+    //     delay(100);
+    // }
+
+    Serial.printf("Der Loop ist am Loopen Penis\n");
 }
+

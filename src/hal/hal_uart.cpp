@@ -4,24 +4,19 @@
 namespace HAL {
 
 bool uartInit(uint32_t baudrate) {
-    try {
-        // Starte Serial mit angegeben Baudrate
-        Serial.begin(baudrate);
-        
-        // Warte kurz, bis Serial ready ist
-        delay(100);
-        
-        // Welcome Message
-        Serial.println("\n========================================");
-        Serial.println("MAGGIE On-Board Computer - REXUS Rocket");
-        Serial.println("========================================");
-        Serial.println("[HAL_UART] Serial initialized at " + String(baudrate) + " baud");
-        Serial.println("========================================\n");
-        
-        return true;
-    } catch (...) {
-        return false;
-    }
+    Serial.begin(baudrate);
+    delay(100);
+
+    Serial.println("\n========================================");
+    Serial.println("MAGGIE On-Board Computer - REXUS Rocket");
+    Serial.println("========================================");
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "[HAL_UART] Serial initialized at %lu baud", (unsigned long)baudrate);
+    Serial.println(buf);
+
+    Serial.println("========================================\n");
+    return true;
 }
 
 void uartWrite(char c) {
@@ -74,8 +69,9 @@ void uartFlush() {
     Serial.flush();
 }
 
-void uartDebugPrint(const String& message) {
-    Serial.println("[DEBUG] " + message);
+void uartDebugPrint(const char* message) {
+    Serial.print("[DEBUG] ");
+    Serial.println(message);
 }
 
 } // namespace HAL

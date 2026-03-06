@@ -57,7 +57,7 @@ void System::printWelcomeBanner() {
     Serial.println("║                  v1.0                           ║");
     Serial.println("╚═════════════════════════════════════════════════╝");
     Serial.println("");
-    Serial.println("Built with Arduino Framework on Teensy 4.1");
+    Serial.println("Built with heart on Teensy 4.1");
     Serial.println("Copyright 2026 - All Rights Reserved");
     Serial.println("");
 }

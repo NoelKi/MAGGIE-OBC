@@ -5,8 +5,15 @@ CAN_message_t msg;
 
 namespace HAL {
 
-void canInit(uint32_t baud) {
-    CANbus.begin();
+bool canInit(uint32_t baud) {
+    try {
+        CANbus.begin();
+        Serial.println("[HAL_CAN] CAN Bus initialized at " + String(baud) + " baud");
+        return true;
+    } catch (...) {
+        Serial.println("[HAL_CAN] ERROR: Failed to initialize CAN bus");
+        return false;
+    }
 }
 
 bool canSend(uint32_t id, uint8_t* data, uint8_t len) {

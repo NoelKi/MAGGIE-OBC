@@ -4,7 +4,7 @@
 
 namespace HAL {
 
-void canInit(uint32_t baud);
+bool canInit(uint32_t baud);
 bool canSend(uint32_t id, uint8_t* data, uint8_t len);
 bool canReceive(uint32_t &id, uint8_t* data, uint8_t &len);
 

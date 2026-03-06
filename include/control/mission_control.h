@@ -4,8 +4,8 @@
 #include <cstdint>
 #include "services/data_collection_service.h"
 #include "services/telemetry_service.h"
-#include "control/experiment_controller.h"
 #include "control/safety_monitor.h"
+#include "control/flight_experiment_controller.h"
 
 /**
  * @brief Zentrale Mission-Kontrolleinheit
@@ -59,6 +59,12 @@ public:
      * @brief Startet Mission
      */
     void startMission();
+
+    /**
+     * @brief Prüft ob Start-Signal empfangen wurde
+     * @return true wenn Start-Signal empfangen wurde
+     */
+    bool isLiftOffSignal();
     
     /**
      * @brief Stoppt Mission (Notfall)
@@ -73,14 +79,19 @@ private:
     // Subsystem-Instances
     DataCollectionService data_collector;
     TelemetryService telemetry;
-    ExperimentController experiment;
     SafetyMonitor safety;
+    FlightExperimentController experiment;
     
     // Telemetrie-Buffer
     TelemetryData last_telemetry = {};
     char telemetry_buffer[256];
     
     static constexpr uint32_t TELEMETRY_INTERVAL = 100;  // 100ms = 10Hz
+    
+    // Flugphasen-Erkennung
+    bool detectApogee();
+    bool detectDescent();
+    bool detectLanding();
     
     void onStateChange(MissionState new_state);
     void printMissionStatus();

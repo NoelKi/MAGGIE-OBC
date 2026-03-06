@@ -30,8 +30,7 @@ bool MissionControl::init() {
     }
     
     if (!experiment.init()) {
-        Serial.println("FATAL: Experiment controller initialization failed");
-        return false;
+        Serial.println("WARNING: Flight experiment controller initialization failed");
     }
     
     onStateChange(MissionState::STARTUP);
@@ -41,13 +40,20 @@ bool MissionControl::init() {
 }
 
 void MissionControl::run() {
-    // Update all subsystems
+    // Update Safety immer
     safety.update();
+    
+    // Notfall-Check: Safety hat höchste Priorität
+    if (safety.getCurrentLevel() == SafetyLevel::EMERGENCY) {
+        experiment.emergencyStop("Safety monitor triggered emergency");
+        abortMission();
+        return;
+    }
     
     // Handle current state
     switch (current_state) {
         case MissionState::STARTUP:
-            // Auto transition nach kurzer Zeit
+            // Auto-Transition nach Boot
             if (millis() > 5000) {
                 onStateChange(MissionState::PREFLIGHT_CHECK);
             }
@@ -56,52 +62,91 @@ void MissionControl::run() {
         case MissionState::PREFLIGHT_CHECK:
             // Automatische Preflight-Checks
             if (preflightCheck()) {
+                // Arme das Experiment nach erfolgreichen Checks
+                experiment.armExperiment();
                 onStateChange(MissionState::STANDBY);
             }
             break;
             
         case MissionState::STANDBY:
-            // Warte auf Experiment-Start
-            // TODO: Implementiere Start-Signal-Erkennung
-            // z.B. via Kommando über CAN oder Serial
+            // Warte auf Lift-Off Signal (z.B. via CAN, Serial, oder Accelerometer)
+            if (isLiftOffSignal()) {
+                startMission();
+            }
             break;
             
         case MissionState::ASCENT:
-        case MissionState::MICROGRAVITY:
-        case MissionState::DESCENT:
-        case MissionState::RECOVERY:
-            // Hauptflug-Phase
+            // Aufstiegsphase: Experiment pausiert, Daten werden gesammelt
             experiment.update();
             
-            // Sammle und übertrage Daten
-            if (millis() - last_telemetry_time > TELEMETRY_INTERVAL) {
-                if (data_collector.collectData(last_telemetry)) {
-                    // Berechne Beschleunigung-Magnitude
-                    float accel_mag = sqrtf(last_telemetry.accel_x * last_telemetry.accel_x +
-                                           last_telemetry.accel_y * last_telemetry.accel_y +
-                                           last_telemetry.accel_z * last_telemetry.accel_z);
-                    
-                    // Sicherheits-Check
-                    safety.checkSensorBounds(accel_mag, last_telemetry.temperature, last_telemetry.altitude);
-                    
-                    // Formatiere und sende Telemetrie
-                    telemetry.formatTelemetryCSV(telemetry_buffer, sizeof(telemetry_buffer),
-                                                last_telemetry.sequence,
-                                                last_telemetry.accel_x, last_telemetry.accel_y, last_telemetry.accel_z,
-                                                last_telemetry.gyro_x, last_telemetry.gyro_y, last_telemetry.gyro_z,
-                                                last_telemetry.pressure, last_telemetry.altitude, last_telemetry.temperature);
-                    
-                    telemetry.transmit(TelemetryChannel::SERIAL_DEBUG, telemetry_buffer);
-                }
-                
-                last_telemetry_time = millis();
+            // Erkennung: Schwerelosigkeit (Apogee erreicht)
+            if (detectApogee()) {
+                experiment.onFlightPhaseChange(FlightPhase::MICROGRAVITY);
+                onStateChange(MissionState::MICROGRAVITY);
+            }
+            break;
+            
+        case MissionState::MICROGRAVITY:
+            // Schwerelosigkeitsphase: Experiment läuft aktiv!
+            experiment.update();
+            
+            // Erkennung: Abstieg beginnt
+            if (detectDescent()) {
+                experiment.onFlightPhaseChange(FlightPhase::DESCENT);
+                onStateChange(MissionState::DESCENT);
+            }
+            break;
+            
+        case MissionState::DESCENT:
+            // Abstiegsphase: Experiment pausiert
+            experiment.update();
+            
+            // Erkennung: Landung
+            if (detectLanding()) {
+                experiment.onFlightPhaseChange(FlightPhase::RECOVERY);
+                onStateChange(MissionState::RECOVERY);
+            }
+            break;
+            
+        case MissionState::RECOVERY:
+            // Bergungsphase: Daten sichern
+            experiment.update();
+            
+            // Nach 30 Sekunden Recovery → Shutdown
+            if (getMissionTime() > 0 && (millis() - mission_start_time) > 300000) {
+                onStateChange(MissionState::SHUTDOWN);
             }
             break;
             
         case MissionState::SHUTDOWN:
-            // Finale Herunterfahren
-            Serial.println("INFO: Mission complete");
+            Serial.println("INFO: Mission complete - shutting down");
             break;
+    }
+    
+    // Telemetrie in allen aktiven Flugphasen senden
+    if (current_state >= MissionState::ASCENT && current_state <= MissionState::RECOVERY) {
+        if (millis() - last_telemetry_time > TELEMETRY_INTERVAL) {
+            if (data_collector.collectData(last_telemetry)) {
+                // Berechne Beschleunigung-Magnitude
+                float accel_mag = sqrtf(last_telemetry.accel_x * last_telemetry.accel_x +
+                                       last_telemetry.accel_y * last_telemetry.accel_y +
+                                       last_telemetry.accel_z * last_telemetry.accel_z);
+                
+                // Sicherheits-Check
+                safety.checkSensorBounds(accel_mag, last_telemetry.temperature, last_telemetry.altitude);
+                
+                // Formatiere und sende Telemetrie
+                telemetry.formatTelemetryCSV(telemetry_buffer, sizeof(telemetry_buffer),
+                                            last_telemetry.sequence,
+                                            last_telemetry.accel_x, last_telemetry.accel_y, last_telemetry.accel_z,
+                                            last_telemetry.gyro_x, last_telemetry.gyro_y, last_telemetry.gyro_z,
+                                            last_telemetry.pressure, last_telemetry.altitude, last_telemetry.temperature);
+                
+                telemetry.transmit(TelemetryChannel::SERIAL_DEBUG, telemetry_buffer);
+            }
+            
+            last_telemetry_time = millis();
+        }
     }
 }
 
@@ -145,6 +190,15 @@ bool MissionControl::preflightCheck() {
     return true;
 }
 
+bool MissionControl::isLiftOffSignal() {
+    // TODO: Implementiere echte Start-Signal-Erkennung
+    // Optionen:
+    // 1. CAN-Bus Kommando vom Service-Modul
+    // 2. Accelerometer-Schwelle (z.B. > 3g)
+    // 3. Serial-Kommando (Debug)
+    return false;
+}
+
 void MissionControl::startMission() {
     if (current_state != MissionState::STANDBY) {
         Serial.println("ERROR: Cannot start from current state");
@@ -152,15 +206,57 @@ void MissionControl::startMission() {
     }
     
     mission_start_time = millis();
-    experiment.calibrateSensors();
-    experiment.start();
+    experiment.onFlightPhaseChange(FlightPhase::ASCENT);
     onStateChange(MissionState::ASCENT);
+    
+    Serial.println("INFO: Mission started - ASCENT phase");
 }
 
 void MissionControl::abortMission() {
     Serial.println("WARNING: Mission aborted!");
-    experiment.reset();
+    experiment.emergencyStop("Mission aborted");
     safety.emergencyShutdown();
+    onStateChange(MissionState::SHUTDOWN);
+}
+
+bool MissionControl::detectApogee() {
+    // Erkennung der Schwerelosigkeit:
+    // Beschleunigung nahe 0g (alle Achsen < 0.5 m/s²)
+    float accel_mag = sqrtf(last_telemetry.accel_x * last_telemetry.accel_x +
+                           last_telemetry.accel_y * last_telemetry.accel_y +
+                           last_telemetry.accel_z * last_telemetry.accel_z);
+    
+    // Schwerelosigkeit: Beschleunigung < 0.5 m/s² (nahe 0g)
+    return accel_mag < 0.5f;
+}
+
+bool MissionControl::detectDescent() {
+    // Erkennung des Abstiegs:
+    // Beschleunigung steigt wieder > 1g UND Höhe sinkt
+    float accel_mag = sqrtf(last_telemetry.accel_x * last_telemetry.accel_x +
+                           last_telemetry.accel_y * last_telemetry.accel_y +
+                           last_telemetry.accel_z * last_telemetry.accel_z);
+    
+    // Wenn Beschleunigung wieder deutlich über 0g steigt → Abstieg beginnt
+    static float last_altitude = 0.0f;
+    bool altitude_decreasing = (last_telemetry.altitude < last_altitude - 10.0f);
+    last_altitude = last_telemetry.altitude;
+    
+    return (accel_mag > 5.0f) && altitude_decreasing;
+}
+
+bool MissionControl::detectLanding() {
+    // Erkennung der Landung:
+    // Beschleunigung ca. 1g UND Höhe stabil (nahe 0)
+    float accel_mag = sqrtf(last_telemetry.accel_x * last_telemetry.accel_x +
+                           last_telemetry.accel_y * last_telemetry.accel_y +
+                           last_telemetry.accel_z * last_telemetry.accel_z);
+    
+    // ~1g (9.81 ± 1.0 m/s²) UND Altitude < 500m
+    bool gravity_normal = (accel_mag > 8.8f && accel_mag < 10.8f);
+    bool low_altitude = (last_telemetry.altitude < 500.0f);
+    
+    return gravity_normal && low_altitude;
 }
 
 void MissionControl::onStateChange(MissionState new_state) {

@@ -43,8 +43,7 @@ bool MissionControl::init() {
 
 void MissionControl::run() {
     // 1) Safety hat immer höchste Priorität
-    Serial.printf("Mission Control ist am Controllen");
-    return;
+    // return;
     
     safety.update();
 
@@ -71,6 +70,7 @@ void MissionControl::run() {
 // ============================================================================
 
 void MissionControl::handleStartup() {
+    Serial.printf("Mission Control ist am Controllen\n");
     if (millis() - state_entry_time > BOOT_DELAY) {
         transitionTo(MissionState::PREFLIGHT_CHECK);
     }

@@ -94,7 +94,7 @@ private:
     char telemetry_buffer[256];
 
     static constexpr uint32_t TELEMETRY_INTERVAL = 100;  // 10 Hz
-    static constexpr uint32_t BOOT_DELAY = 3000;          // 3s Boot
+    static constexpr uint32_t BOOT_DELAY = 10000;          // 3s Boot
     static constexpr uint8_t  MAX_PREFLIGHT_RETRIES = 3;
 
     // State-Handler

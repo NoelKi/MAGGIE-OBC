@@ -47,6 +47,7 @@ Koordiniert den gesamten Missionsablauf:
 - **MICROGRAVITY**: Schwerelosigkeitsphase
 - **DESCENT**: Abstiegsphase
 - **RECOVERY**: Bergungsphase
+- **TESTING**: Bergungsphase
 
 #### 2. **Sensortreiber**
 

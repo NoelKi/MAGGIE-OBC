@@ -52,12 +52,12 @@ uint32_t System::getUptimeMs() const {
 void System::printWelcomeBanner() {
     Serial.println("\n");
     Serial.println("╔═════════════════════════════════════════════════╗");
-    Serial.println("║         MAGGIE On-Board Computer                ║");
-    Serial.println("║    REXUS Program - Rocket Experiment System     ║");
-    Serial.println("║                  v1.0                           ║");
+    Serial.println("║             MAGGIE On-Board Computer            ║");
+    Serial.println("║     REXUS Program - Rocket Experiment System    ║");
+    Serial.println("║                     v 1.0                       ║");
     Serial.println("╚═════════════════════════════════════════════════╝");
     Serial.println("");
-    Serial.println("Built with heart on Teensy 4.1");
+    Serial.println("Built by MAGGIE Team on Teensy 4.1");
     Serial.println("Copyright 2026 - All Rights Reserved");
     Serial.println("");
 }

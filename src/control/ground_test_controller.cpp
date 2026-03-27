@@ -15,11 +15,19 @@ bool GroundTestController::init() {
     Serial.println("Initializing...");
     Serial.println("===================================");
     
+    // Initialisiere Motor-Driver
+    if (!motor_driver.init()) {
+        Serial.println("WARN: Motor driver initialization failed");
+    } else {
+        Serial.println("✓ Motor driver initialized");
+    }
+    
     current_mode = GroundTestMode::IDLE;
     
     Serial.println("\nAvailable Commands:");
     Serial.println("  TEST_SENSOR <id>         - Test sensor (0=IMU, 1=Baro, 2=Temp)");
     Serial.println("  TEST_DEVICE <id>         - Test device (0=Valve1, 1=Valve2, 2=Motor)");
+    Serial.println("  MOTOR <speed> [dir]      - Spin motor (0-255), dir: F/B/S (Forward/Backward/Stop)");
     Serial.println("  ACTIVATE <id> [power]    - Activate device (0-255)");
     Serial.println("  DEACTIVATE <id>          - Deactivate device");
     Serial.println("  CALIBRATE <id>           - Calibrate sensor");
@@ -94,11 +102,11 @@ void GroundTestController::testDevice(uint8_t device_id) {
             Serial.println("  Testing Motor/Arm");
             Serial.println("  Testing speed ramp: 0% -> 100% -> 0%");
             for (uint8_t speed = 0; speed <= 255; speed += 51) {
-                activateDevice(device_id, speed);
-                Serial.printf("    Speed: %d\n", speed);
+                motor_driver.setPWM(speed, MotorDirection::FORWARD);
+                Serial.printf("    Forward Speed: %d/255\n", speed);
                 delay(500);
             }
-            deactivateDevice(device_id);
+            motor_driver.stop();
             Serial.println("  Motor stopped");
             break;
             
@@ -113,15 +121,19 @@ void GroundTestController::activateDevice(uint8_t device_id, uint8_t power) {
     Serial.printf("INFO: Activating Device %d (Power: %d/255)\n", device_id, power);
     active_device = device_id;
     
-    // TODO: Implementiere Hardware-Steuerung via HAL
-    // HAL::activateDevice(device_id, power);
+    // Device 2 is the motor
+    if (device_id == 2) {
+        motor_driver.setPWM(power, MotorDirection::FORWARD);
+    }
 }
 
 void GroundTestController::deactivateDevice(uint8_t device_id) {
     Serial.printf("INFO: Deactivating Device %d\n", device_id);
     
-    // TODO: Implementiere Hardware-Steuerung via HAL
-    // HAL::deactivateDevice(device_id);
+    // Device 2 is the motor
+    if (device_id == 2) {
+        motor_driver.stop();
+    }
     
     active_device = 0xFF;
 }
@@ -164,6 +176,33 @@ void GroundTestController::handleSerialCommand(const String& command) {
     else if (command.startsWith("TEST_DEVICE")) {
         int device_id = command.substring(12).toInt();
         testDevice(device_id);
+    }
+    else if (command.startsWith("MOTOR")) {
+        // MOTOR <speed> [direction]
+        // Example: "MOTOR 200 F" (Forward at speed 200)
+        //          "MOTOR 150 B" (Backward at speed 150)
+        //          "MOTOR 0"     (Stop)
+        int space_idx = command.indexOf(' ', 6);
+        int speed = command.substring(6, space_idx).toInt();
+        
+        MotorDirection direction = MotorDirection::FORWARD;
+        if (space_idx > 0 && space_idx < command.length() - 1) {
+            char dir_char = command.charAt(space_idx + 1);
+            if (dir_char == 'F' || dir_char == 'f') {
+                direction = MotorDirection::FORWARD;
+            } else if (dir_char == 'B' || dir_char == 'b') {
+                direction = MotorDirection::BACKWARD;
+            } else if (dir_char == 'S' || dir_char == 's') {
+                direction = MotorDirection::STOP;
+            }
+        }
+        
+        if (speed == 0) {
+            motor_driver.stop();
+            Serial.println("✓ Motor stopped");
+        } else {
+            motor_driver.setPWM(speed, direction);
+        }
     }
     else if (command.startsWith("ACTIVATE")) {
         int space_idx = command.indexOf(' ', 9);

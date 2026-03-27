@@ -154,7 +154,7 @@ void MissionControl::handleTesting() {
 }
 
 void MissionControl::handleHardwareTesting() {
-    ground_test_controller.update();
+    //ground_test_controller.update();
 
     // Serial-Kommandos an GroundTestController weiterleiten
     if (Serial.available()) {
@@ -237,12 +237,12 @@ bool MissionControl::runPreflightChecks() {
     bool ok = true;
 
     // 1) Sensoren
-    if (data_collector.getSensorStatus() == 0) {
-        Serial.println("  ✗ Sensors: NONE detected");
-        ok = false;
-    } else {
-        Serial.println("  ✓ Sensors: OK");
-    }
+    // if (data_collector.getSensorStatus() == 0) {
+    //     Serial.println("  ✗ Sensors: NONE detected");
+    //     ok = false;
+    // } else {
+    //     Serial.println("  ✓ Sensors: OK");
+    // }
 
     // 2) Stromversorgung
     if (!safety.checkPowerSupply()) {

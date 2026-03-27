@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <cstdint>
+#include "drivers/pwm_motor_driver.h"
 
 /**
  * @brief Ground Test Controller
@@ -96,6 +97,14 @@ private:
     uint8_t active_sensor = 0xFF;
     uint8_t active_device = 0xFF;
     uint32_t last_read_time = 0;
+    
+    // Hardware Driver für Motor
+    PWMMotorDriver motor_driver{
+        22,  // PWM pin
+        23,  // Direction pin 1 (forward)
+        24,  // Direction pin 2 (backward)
+        25   // Enable pin
+    };
     
     void printSensorData(uint8_t sensor_id);
     void printDeviceStatus(uint8_t device_id);

@@ -20,20 +20,10 @@ enum class MissionState {
     STARTUP,           // Boot-Phase: HAL + Services initialisieren
     PREFLIGHT_CHECK,   // Automatische System-Checks
     STANDBY,           // Bereit: Warte auf Modus-Auswahl (F/T/H/S)
-    EXPERIMENT,        // Flug-Modus: FlightExperimentController steuert alles
+    FLIGHT,        // Flug-Modus: FlightExperimentController steuert alles
     TESTING,           // Test-Modus: PreflightTestController validiert Sequenzen
     HARDWARE_TESTING,  // HW-Test-Modus: GroundTestController testet Einzelgeräte
     SHUTDOWN,          // System herunterfahren
-};
-
-/**
- * @brief Betriebsmodus — gewählt aus STANDBY
- */
-enum class OperationMode {
-    NONE,
-    FLIGHT,
-    TESTING,
-    HARDWARE_TEST,
 };
 
 /**
@@ -61,11 +51,12 @@ public:
 
     // State
     MissionState getCurrentState() const;
-    OperationMode getOperationMode() const;
     uint32_t getMissionTime() const;
 
     // Modus-Auswahl (nur aus STANDBY)
-    bool selectMode(OperationMode mode);
+    bool selectFlightMode();
+    bool selectTestingMode();
+    bool selectHardwareTestMode();
 
     // Shutdown & Emergency
     void requestShutdown();
@@ -73,7 +64,6 @@ public:
 
 private:
     MissionState current_state = MissionState::STARTUP;
-    OperationMode operation_mode = OperationMode::NONE;
     uint32_t boot_time = 0;
     uint32_t state_entry_time = 0;
     uint32_t last_telemetry_time = 0;

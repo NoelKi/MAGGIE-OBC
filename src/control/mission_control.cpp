@@ -58,7 +58,7 @@ void MissionControl::run() {
         case MissionState::STARTUP:          handleStartup();          break;
         case MissionState::PREFLIGHT_CHECK:  handlePreflightCheck();   break;
         case MissionState::STANDBY:          handleStandby();          break;
-        case MissionState::EXPERIMENT:       handleExperiment();       break;
+        case MissionState::FLIGHT:           handleExperiment();       break;
         case MissionState::TESTING:          handleTesting();          break;
         case MissionState::HARDWARE_TESTING: handleHardwareTesting();  break;
         case MissionState::SHUTDOWN:         handleShutdown();         break;
@@ -100,8 +100,9 @@ void MissionControl::handleStandby() {
     // Info alle 10 Sekunden
     static uint32_t last_info = 0;
     if (millis() - last_info > 10000) {
-        Serial.println("STANDBY: Awaiting mode selection");
-        Serial.println("  [F] Flight  [T] Testing  [H] Hardware Test  [S] Shutdown");
+        transitionTo(MissionState::HARDWARE_TESTING);
+        // Serial.println("STANDBY: Awaiting mode selection");
+        // Serial.println("  [F] Flight  [T] Testing  [H] Hardware Test  [S] Shutdown");
         last_info = millis();
     }
 }
@@ -177,7 +178,7 @@ void MissionControl::handleShutdown() {
     Serial.println("===================================");
 
     // Experiment sicher stoppen
-    if (operation_mode == OperationMode::FLIGHT) {
+    if (current_state == MissionState::FLIGHT) {
         flight_controller.emergencyStop("Shutdown sequence");
     }
 
@@ -193,38 +194,41 @@ void MissionControl::handleShutdown() {
 // Modus-Auswahl
 // ============================================================================
 
-bool MissionControl::selectMode(OperationMode mode) {
+bool MissionControl::selectFlightMode() {
     if (current_state != MissionState::STANDBY) {
         Serial.println("ERROR: Mode selection only available in STANDBY");
         return false;
     }
 
-    operation_mode = mode;
+    Serial.println("\nMODE: FLIGHT selected");
+    flight_controller.init();
+    flight_controller.armExperiment();
+    transitionTo(MissionState::FLIGHT);
+    return true;
+}
 
-    switch (mode) {
-        case OperationMode::FLIGHT:
-            Serial.println("\nMODE: FLIGHT selected");
-            flight_controller.init();
-            flight_controller.armExperiment();
-            transitionTo(MissionState::EXPERIMENT);
-            break;
-
-        case OperationMode::TESTING:
-            Serial.println("\nMODE: TESTING selected");
-            preflight_test_controller.init();
-            preflight_test_controller.runFullTest(true);
-            transitionTo(MissionState::TESTING);
-            break;
-
-        case OperationMode::HARDWARE_TEST:
-            Serial.println("\nMODE: HARDWARE TEST selected");
-            ground_test_controller.init();
-            transitionTo(MissionState::HARDWARE_TESTING);
-            break;
-
-        default:
-            return false;
+bool MissionControl::selectTestingMode() {
+    if (current_state != MissionState::STANDBY) {
+        Serial.println("ERROR: Mode selection only available in STANDBY");
+        return false;
     }
+
+    Serial.println("\nMODE: TESTING selected");
+    preflight_test_controller.init();
+    preflight_test_controller.runFullTest(true);
+    transitionTo(MissionState::TESTING);
+    return true;
+}
+
+bool MissionControl::selectHardwareTestMode() {
+    if (current_state != MissionState::STANDBY) {
+        Serial.println("ERROR: Mode selection only available in STANDBY");
+        return false;
+    }
+
+    Serial.println("\nMODE: HARDWARE TEST selected");
+    ground_test_controller.init();
+    transitionTo(MissionState::HARDWARE_TESTING);
     return true;
 }
 
@@ -293,9 +297,9 @@ void MissionControl::checkForCommands() {
 
     char cmd = Serial.read();
     switch (cmd) {
-        case 'F': case 'f': selectMode(OperationMode::FLIGHT);        break;
-        case 'T': case 't': selectMode(OperationMode::TESTING);       break;
-        case 'H': case 'h': selectMode(OperationMode::HARDWARE_TEST); break;
+        case 'T': case 't': selectTestingMode();       break;
+        case 'H': case 'h': selectHardwareTestMode(); break;
+        case 'F': case 'f': selectFlightMode();        break;
         case 'S': case 's': requestShutdown();                        break;
         default:
             Serial.printf("Unknown command: '%c'\n", cmd);
@@ -322,10 +326,6 @@ MissionState MissionControl::getCurrentState() const {
     return current_state;
 }
 
-OperationMode MissionControl::getOperationMode() const {
-    return operation_mode;
-}
-
 uint32_t MissionControl::getMissionTime() const {
     return millis() - boot_time;
 }
@@ -337,7 +337,7 @@ void MissionControl::requestShutdown() {
 
 void MissionControl::abortMission() {
     Serial.println("EMERGENCY: Mission abort!");
-    if (operation_mode == OperationMode::FLIGHT) {
+    if (current_state == MissionState::FLIGHT) {
         flight_controller.emergencyStop("Mission abort");
     }
     safety.emergencyShutdown();
@@ -349,7 +349,7 @@ const char* MissionControl::stateToString(MissionState state) const {
         case MissionState::STARTUP:          return "STARTUP";
         case MissionState::PREFLIGHT_CHECK:  return "PREFLIGHT_CHECK";
         case MissionState::STANDBY:          return "STANDBY";
-        case MissionState::EXPERIMENT:       return "EXPERIMENT";
+        case MissionState::FLIGHT:       return "EXPERIMENT";
         case MissionState::TESTING:          return "TESTING";
         case MissionState::HARDWARE_TESTING: return "HARDWARE_TESTING";
         case MissionState::SHUTDOWN:         return "SHUTDOWN";

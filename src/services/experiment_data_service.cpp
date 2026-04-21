@@ -1,7 +1,8 @@
 #include "services/experiment_data_service.hpp"
 
 ExperimentDataService::ExperimentDataService()
-    : pressure_sensor(10),  // CS Pin 10 für SPI
+    : imu(),  // BMI088 mit Default-Pins (Accel=10, Gyro=9)
+      pressure_sensor(10),  // CS Pin 10 für SPI
       weight_sensors(A0, A1),  // Analog Pins A0, A1 für Waagen
       motor(9, 7, 8)  // PWM Pin 9, Dir Pin 7, Dir Pin 8
 {

@@ -116,6 +116,10 @@ public:
     uint32_t getDataPointCount() const { return data_count; }
 
 private:
+    // BMI088 CS-Pins (SPI)
+    static constexpr uint8_t IMU_ACCEL_CS = 10;  // Chip Select für Accelerometer
+    static constexpr uint8_t IMU_GYRO_CS = 9;   // Chip Select für Gyroscope
+    
     // Sensoren
     IMUDriver imu;
     PressureTemperatureDriver barometer;

@@ -24,7 +24,8 @@ struct IMUData {
 
 class IMUDriver {
 public:
-    IMUDriver(uint8_t accel_cs_pin, uint8_t gyro_cs_pin);
+    // Default CS-Pins: Accel auf Pin 10, Gyro auf Pin 9
+    IMUDriver(uint8_t accel_cs_pin = 10, uint8_t gyro_cs_pin = 9);
     ~IMUDriver();
     
     /**

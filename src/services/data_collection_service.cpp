@@ -1,6 +1,8 @@
 #include "services/data_collection_service.hpp"
 
-DataCollectionService::DataCollectionService() {
+DataCollectionService::DataCollectionService()
+    : imu()  // BMI088 mit Default-Pins (Accel=10, Gyro=9)
+{
     // Konstruktor
 }
 
@@ -64,10 +66,6 @@ bool DataCollectionService::collectData(TelemetryData& data) {
     data.gyro_x = imu_data.gyro_x;
     data.gyro_y = imu_data.gyro_y;
     data.gyro_z = imu_data.gyro_z;
-    
-    data.mag_x = imu_data.mag_x;
-    data.mag_y = imu_data.mag_y;
-    data.mag_z = imu_data.mag_z;
     
     data.pressure = baro_data.pressure;
     data.temperature = baro_data.temperature;

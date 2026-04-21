@@ -22,7 +22,7 @@ void setup() {
 
 void loop() {
     if (g_system) {
-        g_system->run();
+        // g_system->run();
     } else {
         delay(100);
     }

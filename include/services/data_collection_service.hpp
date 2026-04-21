@@ -11,10 +11,9 @@
  */
 
 struct TelemetryData {
-    // IMU-Daten
+    // IMU-Daten (BMI088: 6-DOF ohne Magnetometer)
     float accel_x, accel_y, accel_z;
     float gyro_x, gyro_y, gyro_z;
-    float mag_x, mag_y, mag_z;
     
     // Barometer-Daten
     float pressure;
@@ -67,6 +66,10 @@ public:
     uint32_t getDataPointCount() const;
 
 private:
+    // BMI088 CS-Pins (SPI)
+    static constexpr uint8_t IMU_ACCEL_CS = 10;  // Chip Select für Accelerometer
+    static constexpr uint8_t IMU_GYRO_CS = 9;   // Chip Select für Gyroscope
+    
     IMUDriver imu;
     PressureTemperatureDriver barometer;
     

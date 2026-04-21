@@ -1,5 +1,5 @@
-#include "hal_i2c.h"
-#include "hal_config.h"
+#include "hal_i2c.hpp"
+#include "hal_config.hpp"
 
 namespace HAL {
 

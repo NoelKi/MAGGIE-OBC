@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <cstdint>
-#include "drivers/pwm_motor_driver.h"
+#include "drivers/pwm_motor_driver.hpp"
 
 /**
  * @brief Ground Test Controller

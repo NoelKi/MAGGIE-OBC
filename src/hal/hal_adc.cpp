@@ -1,6 +1,6 @@
 #include <Arduino.h>
-#include "hal_adc.h"
-#include "hal_config.h"
+#include "hal_adc.hpp"
+#include "hal_config.hpp"
 
 namespace HAL {
 

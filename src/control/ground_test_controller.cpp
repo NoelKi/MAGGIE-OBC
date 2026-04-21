@@ -1,5 +1,5 @@
-#include "control/ground_test_controller.h"
-#include "hal/hal.h"
+#include "control/ground_test_controller.hpp"
+#include "hal/hal.hpp"
 
 GroundTestController::GroundTestController() {
     // Konstruktor

@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "system.h"
+#include "system.hpp"
 
 // Globale System-Instanz
 System* g_system = nullptr;

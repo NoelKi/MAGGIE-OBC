@@ -17,28 +17,28 @@
  */
 
 // Config (muss zuerst importiert werden)
-#include "hal_config.h"
+#include "hal_config.hpp"
 
 // GPIO & LED
-#include "hal_gpio.h"
+#include "hal_gpio.hpp"
 
 // I2C (für IMU, Barometer)
-#include "hal_i2c.h"
+#include "hal_i2c.hpp"
 
 // SPI (für Drucksensor, SD-Card)
-#include "hal_spi.h"
+#include "hal_spi.hpp"
 
 // ADC (für Weight Sensors)
-#include "hal_adc.h"
+#include "hal_adc.hpp"
 
 // PWM (für Motor)
-#include "hal_pwm.h"
+#include "hal_pwm.hpp"
 
 // UART (für Telemetry Serial)
-#include "hal_uart.h"
+#include "hal_uart.hpp"
 
 // CAN (für STM32 Roboterarm)
-#include "hal_can.h"
+#include "hal_can.hpp"
 
 /**
  * Zentrale HAL-Initialisierung

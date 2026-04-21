@@ -1,5 +1,5 @@
-#include "hal_pwm.h"
-#include "hal_config.h"
+#include "hal_pwm.hpp"
+#include "hal_config.hpp"
 
 namespace HAL {
 

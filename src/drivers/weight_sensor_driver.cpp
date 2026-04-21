@@ -1,4 +1,4 @@
-#include "drivers/weight_sensor_driver.h"
+#include "drivers/weight_sensor_driver.hpp"
 
 WeightSensorDriver::WeightSensorDriver(uint8_t pin_scale1, uint8_t pin_scale2)
     : pin_scale1(pin_scale1), pin_scale2(pin_scale2), scale_type(ScaleType::ANALOG_ADC) {

@@ -1,4 +1,4 @@
-#include "hal_can.h"
+#include "hal_can.hpp"
 
 // FlexCAN_T4 für Teensy 4.x — nutzt CAN1 (Pins 22/23)
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> CANbus;

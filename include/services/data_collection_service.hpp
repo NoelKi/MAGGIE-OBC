@@ -2,8 +2,8 @@
 
 #include <Arduino.h>
 #include <cstdint>
-#include "drivers/imu_driver.h"
-#include "drivers/pressure_temperature_driver.h"
+#include "drivers/imu_driver.hpp"
+#include "drivers/pressure_temperature_driver.hpp"
 
 /**
  * @brief Datenerfassungs-Service

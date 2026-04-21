@@ -1,4 +1,4 @@
-#include "drivers/imu_driver.h"
+#include "drivers/imu_driver.hpp"
 #include <cmath>
 
 // Konversionsfaktoren für BMI088

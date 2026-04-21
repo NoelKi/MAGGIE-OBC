@@ -1,4 +1,4 @@
-#include "control/mission_control.h"
+#include "control/mission_control.hpp"
 #include <cmath>
 
 MissionControl::MissionControl() {}

@@ -1,4 +1,4 @@
-#include "control/safety_monitor.h"
+#include "control/safety_monitor.hpp"
 
 SafetyMonitor::SafetyMonitor() {
     // Konstruktor

@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 #include <cstdint>
-#include "services/data_collection_service.h"
-#include "services/telemetry_service.h"
-#include "control/safety_monitor.h"
-#include "control/flight_experiment_controller.h"
-#include "control/ground_test_controller.h"
-#include "control/preflight_test_controller.h"
+#include "services/data_collection_service.hpp"
+#include "services/telemetry_service.hpp"
+#include "control/safety_monitor.hpp"
+#include "control/flight_experiment_controller.hpp"
+#include "control/ground_test_controller.hpp"
+#include "control/preflight_test_controller.hpp"
 
 /**
  * @brief Top-Level Mission States

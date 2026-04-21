@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 #include <cstdint>
-#include "drivers/imu_driver.h"
-#include "drivers/pressure_temperature_driver.h"
-#include "drivers/pressure_sensor_driver.h"
-#include "drivers/weight_sensor_driver.h"
-#include "drivers/pwm_motor_driver.h"
-#include "drivers/can_bus_driver.h"
+#include "drivers/imu_driver.hpp"
+#include "drivers/pressure_temperature_driver.hpp"
+#include "drivers/pressure_sensor_driver.hpp"
+#include "drivers/weight_sensor_driver.hpp"
+#include "drivers/pwm_motor_driver.hpp"
+#include "drivers/can_bus_driver.hpp"
 
 /**
  * @brief Experiment-Datenerfassungs-Service (für Roboterarm-Experiment)

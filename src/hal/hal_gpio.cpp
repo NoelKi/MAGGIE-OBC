@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "hal_gpio.h"
+#include "hal_gpio.hpp"
 
 namespace HAL {
 

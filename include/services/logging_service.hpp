@@ -2,8 +2,8 @@
 
 #include <Arduino.h>
 #include <cstdint>
-#include "services/data_collection_service.h"
-#include "drivers/storage_driver.h"
+#include "services/data_collection_service.hpp"
+#include "drivers/storage_driver.hpp"
 
 /**
  * @brief Daten-Logging-Service

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "control/mission_control.h"
-#include "services/logging_service.h"
+#include "control/mission_control.hpp"
+#include "services/logging_service.hpp"
 
 /**
  * @brief Zentrale System-Klasse

@@ -1,4 +1,4 @@
-#include "control/preflight_test_controller.h"
+#include "control/preflight_test_controller.hpp"
 
 PreflightTestController::PreflightTestController() {
     // Konstruktor

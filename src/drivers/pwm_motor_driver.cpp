@@ -1,4 +1,4 @@
-#include "drivers/pwm_motor_driver.h"
+#include "drivers/pwm_motor_driver.hpp"
 
 PWMMotorDriver::PWMMotorDriver(uint8_t pwm_pin, uint8_t dir_pin1, uint8_t dir_pin2, uint8_t enable_pin)
     : pwm_pin(pwm_pin), dir_pin1(dir_pin1), dir_pin2(dir_pin2), enable_pin(enable_pin) {

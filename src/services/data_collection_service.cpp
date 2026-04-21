@@ -1,4 +1,4 @@
-#include "services/data_collection_service.h"
+#include "services/data_collection_service.hpp"
 
 DataCollectionService::DataCollectionService() {
     // Konstruktor

@@ -1,5 +1,5 @@
-#include "hal_uart.h"
-#include "hal_config.h"
+#include "hal_uart.hpp"
+#include "hal_config.hpp"
 
 namespace HAL {
 

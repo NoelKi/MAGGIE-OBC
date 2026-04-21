@@ -1,4 +1,4 @@
-#include "services/experiment_data_service.h"
+#include "services/experiment_data_service.hpp"
 
 ExperimentDataService::ExperimentDataService()
     : pressure_sensor(10),  // CS Pin 10 für SPI

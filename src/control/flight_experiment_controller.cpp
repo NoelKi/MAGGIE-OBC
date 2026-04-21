@@ -1,4 +1,4 @@
-#include "control/flight_experiment_controller.h"
+#include "control/flight_experiment_controller.hpp"
 #include <cmath>
 
 FlightExperimentController::FlightExperimentController() {}

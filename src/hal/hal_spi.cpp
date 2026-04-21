@@ -1,5 +1,5 @@
-#include "hal_spi.h"
-#include "hal_config.h"
+#include "hal_spi.hpp"
+#include "hal_config.hpp"
 
 namespace HAL {
 

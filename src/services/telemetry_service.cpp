@@ -1,4 +1,4 @@
-#include "services/telemetry_service.h"
+#include "services/telemetry_service.hpp"
 #include <cstdio>
 
 TelemetryService::TelemetryService() {

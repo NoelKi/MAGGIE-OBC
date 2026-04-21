@@ -26,7 +26,5 @@ void loop() {
     } else {
         delay(100);
     }
-
-
 }
 

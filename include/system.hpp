@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include "drivers/weight_sensor_driver.hpp"
+#include "pin_config.hpp"
 
 /**
  * @brief Zentrale System-Klasse
@@ -27,8 +29,16 @@ public:
 private:
     uint32_t startup_time = 0;
     bool system_healthy = false;
-    
+
+    // -----------------------------------------------------------------------
+    // Subsysteme
+    // -----------------------------------------------------------------------
+    WeightSensorDriver* weight_sensor_ = nullptr;
+
+    uint32_t last_weight_read_ms_ = 0;  ///< Zeitstempel des letzten Auslesens
+
     void printWelcomeBanner();
+    void handleWeightReading();
 };
 
 // Externe System-Instanz (definiert in main.cpp)

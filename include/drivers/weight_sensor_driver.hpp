@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <cstdint>
+#include "hal/hx711_hal.hpp"
 
 /**
  * @brief Waagen-/Gewichtssensor Treiber
@@ -105,22 +106,33 @@ public:
     bool isHealthy() const;
 
 private:
-    uint8_t pin_scale1;
-    uint8_t pin_scale2;
-    uint8_t pin_dout1, pin_sck1;
-    uint8_t pin_dout2, pin_sck2;
-    
+    // --- Analog ADC ---
+    uint8_t pin_scale1 = 0;
+    uint8_t pin_scale2 = 0;
+
+    // --- HX711 Bibliotheks-Instanzen (bogde/HX711) ---
+    HX711* hx711_1_ = nullptr;
+    HX711* hx711_2_ = nullptr;
+
+    // Pin-Speicher für den HX711-Konstruktor
+    uint8_t pin_dout1_ = 0, pin_sck1_ = 0;
+    uint8_t pin_dout2_ = 0, pin_sck2_ = 0;
+
     ScaleType scale_type;
     bool initialized = false;
-    
-    float calibration_factor1 = 0.001f;  // g pro ADC-Einheit
-    float calibration_factor2 = 0.001f;
-    uint32_t tare_offset1 = 0;
-    uint32_t tare_offset2 = 0;
-    
-    float last_weight1 = 0;
-    float last_weight2 = 0;
+
+    float calibration_factor1 = 1.0f;  ///< SCALE-Faktor: g pro HX711-LSB
+    float calibration_factor2 = 1.0f;
+
+    float    last_weight1   = 0.0f;
+    float    last_weight2   = 0.0f;
     uint32_t last_read_time = 0;
-    
-    uint32_t readRawValue(uint8_t scale_id);
+
+    /**
+     * @brief Liest den Rohwert für den jeweiligen Sensor.
+     * @param scale_id  1 oder 2
+     * @param[out] raw  Rohwert (vorzeichenbehaftet)
+     * @return true bei Erfolg
+     */
+    bool readRawValue(uint8_t scale_id, int32_t& raw);
 };

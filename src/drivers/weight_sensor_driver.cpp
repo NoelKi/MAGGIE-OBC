@@ -1,134 +1,247 @@
 #include "drivers/weight_sensor_driver.hpp"
 
+// ===========================================================================
+// Konstruktor – Analog ADC
+// ===========================================================================
 WeightSensorDriver::WeightSensorDriver(uint8_t pin_scale1, uint8_t pin_scale2)
-    : pin_scale1(pin_scale1), pin_scale2(pin_scale2), scale_type(ScaleType::ANALOG_ADC) {
-    // Konstruktor für Analog-Sensoren
-}
+    : pin_scale1(pin_scale1), pin_scale2(pin_scale2),
+      scale_type(ScaleType::ANALOG_ADC) {}
 
+// ===========================================================================
+// Konstruktor – HX711 (bogde/HX711-Bibliothek)
+// ===========================================================================
 WeightSensorDriver::WeightSensorDriver(uint8_t pin_dout1, uint8_t pin_sck1,
                                        uint8_t pin_dout2, uint8_t pin_sck2)
-    : pin_dout1(pin_dout1), pin_sck1(pin_sck1),
-      pin_dout2(pin_dout2), pin_sck2(pin_sck2), 
+    : pin_dout1_(pin_dout1), pin_sck1_(pin_sck1),
+      pin_dout2_(pin_dout2), pin_sck2_(pin_sck2),
       scale_type(ScaleType::HX711) {
-    // Konstruktor für HX711-Sensoren
+    hx711_1_ = new HX711();
+    hx711_2_ = new HX711();
 }
 
+// ===========================================================================
+// Destruktor
+// ===========================================================================
 WeightSensorDriver::~WeightSensorDriver() {
-    // Destruktor
+    delete hx711_1_;
+    delete hx711_2_;
 }
 
-bool WeightSensorDriver::init(ScaleType scale_type) {
-    this->scale_type = scale_type;
-    
+// ===========================================================================
+// init
+// ===========================================================================
+bool WeightSensorDriver::init(ScaleType type) {
+    this->scale_type = type;
+
     switch (scale_type) {
+        // -------------------------------------------------------------------
         case ScaleType::ANALOG_ADC:
             pinMode(pin_scale1, INPUT);
             pinMode(pin_scale2, INPUT);
-            Serial.println("INFO: Weight sensors initialized (Analog ADC)");
+            Serial.println("INFO  [WeightSensorDriver]: Analog-ADC initialisiert.");
             break;
-            
+
+        // -------------------------------------------------------------------
         case ScaleType::HX711:
-            // TODO: Initialisiere HX711 Sensoren
-            // pinMode(pin_dout1, INPUT);
-            // pinMode(pin_sck1, OUTPUT);
-            // pinMode(pin_dout2, INPUT);
-            // pinMode(pin_sck2, OUTPUT);
-            Serial.println("INFO: Weight sensors initialized (HX711)");
+            if (!hx711_1_) {
+                Serial.println("ERROR [WeightSensorDriver]: HX711-Objekt nicht vorhanden.");
+                return false;
+            }
+
+            // begin() konfiguriert Pins und Gain (128 = Kanal A, Standard)
+            hx711_1_->begin(pin_dout1_, pin_sck1_, 128);
+            if (!hx711_1_->wait_ready_timeout(2000)) {
+                Serial.println("ERROR [WeightSensorDriver]: HX711 antwortet nicht (Timeout).");
+                return false;
+            }
+            hx711_1_->set_scale(calibration_factor1);
+
+            // Zweiten Sensor nur initialisieren wenn andere Pins verwendet werden
+            if (hx711_2_ && (pin_dout2_ != pin_dout1_ || pin_sck2_ != pin_sck1_)) {
+                hx711_2_->begin(pin_dout2_, pin_sck2_, 128);
+                if (!hx711_2_->wait_ready_timeout(2000)) {
+                    Serial.println("WARN  [WeightSensorDriver]: HX711 #2 antwortet nicht – wird ignoriert.");
+                    delete hx711_2_;
+                    hx711_2_ = nullptr;
+                } else {
+                    hx711_2_->set_scale(calibration_factor2);
+                }
+            }
+
+            Serial.println("INFO  [WeightSensorDriver]: HX711 initialisiert.");
             break;
-            
+
+        // -------------------------------------------------------------------
         case ScaleType::I2C_SCALE:
-            // TODO: Initialisiere I2C Waagen-Module
-            Serial.println("INFO: Weight sensors initialized (I2C)");
+            Serial.println("WARN  [WeightSensorDriver]: I2C-Waage noch nicht implementiert.");
             break;
     }
-    
+
     initialized = true;
     return true;
 }
 
+// ===========================================================================
+// readScale1
+// ===========================================================================
 bool WeightSensorDriver::readScale1(ScaleReading& reading) {
     if (!initialized) return false;
-    
-    uint32_t raw = readRawValue(1);
-    reading.raw_value = raw;
+
+    if (scale_type == ScaleType::HX711) {
+        if (!hx711_1_ || !hx711_1_->is_ready()) return false;
+
+        // Einen einzigen Read – alles aus diesem Wert ableiten
+        const long raw_full = hx711_1_->read();   // 24-Bit, absolut (kein Tare, kein Scale)
+        const long offset   = hx711_1_->get_offset();
+        const float scale   = hx711_1_->get_scale();
+
+        reading.raw_value = static_cast<uint32_t>(raw_full - offset);  // Tare-bereinigt
+        reading.weight    = (scale != 0.0f)
+                                ? static_cast<float>(raw_full - offset) / scale
+                                : 0.0f;
+        reading.voltage   = 0.0f;
+    } else {
+        int32_t raw = 0;
+        if (!readRawValue(1, raw)) return false;
+        reading.raw_value = static_cast<uint32_t>(raw);
+        reading.weight    = static_cast<float>(raw) * calibration_factor1;
+        reading.voltage   = raw * 3.3f / 1023.0f;
+    }
+
     reading.timestamp = millis();
-    reading.weight = (raw - tare_offset1) * calibration_factor1;
-    reading.valid = true;
-    
-    last_weight1 = reading.weight;
-    last_read_time = reading.timestamp;
-    
+    reading.valid     = true;
+    last_weight1      = reading.weight;
+    last_read_time    = reading.timestamp;
     return true;
 }
 
+// ===========================================================================
+// readScale2
+// ===========================================================================
 bool WeightSensorDriver::readScale2(ScaleReading& reading) {
     if (!initialized) return false;
-    
-    uint32_t raw = readRawValue(2);
-    reading.raw_value = raw;
+
+    if (scale_type == ScaleType::HX711) {
+        if (!hx711_2_ || !hx711_2_->is_ready()) return false;
+
+        const long raw_full = hx711_2_->read();
+        const long offset   = hx711_2_->get_offset();
+        const float scale   = hx711_2_->get_scale();
+
+        reading.raw_value = static_cast<uint32_t>(raw_full - offset);
+        reading.weight    = (scale != 0.0f)
+                                ? static_cast<float>(raw_full - offset) / scale
+                                : 0.0f;
+        reading.voltage   = 0.0f;
+    } else {
+        int32_t raw = 0;
+        if (!readRawValue(2, raw)) return false;
+        reading.raw_value = static_cast<uint32_t>(raw);
+        reading.weight    = static_cast<float>(raw) * calibration_factor2;
+        reading.voltage   = raw * 3.3f / 1023.0f;
+    }
+
     reading.timestamp = millis();
-    reading.weight = (raw - tare_offset2) * calibration_factor2;
-    reading.valid = true;
-    
-    last_weight2 = reading.weight;
-    last_read_time = reading.timestamp;
-    
+    reading.valid     = true;
+    last_weight2      = reading.weight;
+    last_read_time    = reading.timestamp;
     return true;
 }
 
+// ===========================================================================
+// readBothScales
+// ===========================================================================
 bool WeightSensorDriver::readBothScales(ScaleReading& reading1, ScaleReading& reading2) {
     return readScale1(reading1) && readScale2(reading2);
 }
 
+// ===========================================================================
+// tareScale1 – nutzt tare() der bogde-Bibliothek (Mittelwert aus 10 Messungen)
+// ===========================================================================
 void WeightSensorDriver::tareScale1() {
-    tare_offset1 = readRawValue(1);
-    Serial.printf("INFO: Scale 1 tared (offset: %lu)\n", tare_offset1);
-}
-
-void WeightSensorDriver::tareScale2() {
-    tare_offset2 = readRawValue(2);
-    Serial.printf("INFO: Scale 2 tared (offset: %lu)\n", tare_offset2);
-}
-
-void WeightSensorDriver::setCalibrationFactor(uint8_t scale_id, float factor) {
-    if (scale_id == 1) {
-        calibration_factor1 = factor;
-        Serial.printf("INFO: Scale 1 calibration factor set to %.6f\n", factor);
-    } else if (scale_id == 2) {
-        calibration_factor2 = factor;
-        Serial.printf("INFO: Scale 2 calibration factor set to %.6f\n", factor);
+    if (scale_type == ScaleType::HX711 && hx711_1_) {
+        hx711_1_->tare(10);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 1 tariert (Offset: %ld)\n",
+                      hx711_1_->get_offset());
+    } else {
+        int32_t raw = 0;
+        readRawValue(1, raw);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 1 tariert (Offset: %ld)\n",
+                      static_cast<long>(raw));
     }
 }
 
+// ===========================================================================
+// tareScale2
+// ===========================================================================
+void WeightSensorDriver::tareScale2() {
+    if (scale_type == ScaleType::HX711 && hx711_2_) {
+        hx711_2_->tare(10);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 2 tariert (Offset: %ld)\n",
+                      hx711_2_->get_offset());
+    } else {
+        int32_t raw = 0;
+        readRawValue(2, raw);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 2 tariert (Offset: %ld)\n",
+                      static_cast<long>(raw));
+    }
+}
+
+// ===========================================================================
+// setCalibrationFactor – setzt set_scale() der bogde-Bibliothek
+// ===========================================================================
+void WeightSensorDriver::setCalibrationFactor(uint8_t scale_id, float factor) {
+    if (scale_id == 1) {
+        calibration_factor1 = factor;
+        if (hx711_1_) hx711_1_->set_scale(factor);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 1 Kalibrierfaktor: %.6f\n", factor);
+    } else if (scale_id == 2) {
+        calibration_factor2 = factor;
+        if (hx711_2_) hx711_2_->set_scale(factor);
+        Serial.printf("INFO  [WeightSensorDriver]: Scale 2 Kalibrierfaktor: %.6f\n", factor);
+    }
+}
+
+// ===========================================================================
+// getTotalWeight
+// ===========================================================================
 float WeightSensorDriver::getTotalWeight() const {
     return last_weight1 + last_weight2;
 }
 
+// ===========================================================================
+// isHealthy
+// ===========================================================================
 bool WeightSensorDriver::isHealthy() const {
     return initialized && (millis() - last_read_time) < 5000;
 }
 
-uint32_t WeightSensorDriver::readRawValue(uint8_t scale_id) {
+// ===========================================================================
+// private: readRawValue
+// ===========================================================================
+bool WeightSensorDriver::readRawValue(uint8_t scale_id, int32_t& raw) {
     switch (scale_type) {
+        // -------------------------------------------------------------------
         case ScaleType::ANALOG_ADC: {
             uint8_t pin = (scale_id == 1) ? pin_scale1 : pin_scale2;
-            // Mehrfache Lesevorgänge für Durchschnittswert
             uint32_t sum = 0;
-            for (int i = 0; i < 10; i++) {
-                sum += analogRead(pin);
+            for (uint8_t i = 0; i < 10; i++) {
+                sum += static_cast<uint32_t>(analogRead(pin));
             }
-            return sum / 10;  // Durchschnittswert
+            raw = static_cast<int32_t>(sum / 10);
+            return true;
         }
-        
+
+        // -------------------------------------------------------------------
         case ScaleType::HX711: {
-            // TODO: Implementiere HX711 Leseverfahren
-            // uint8_t dout_pin = (scale_id == 1) ? pin_dout1 : pin_dout2;
-            // uint8_t sck_pin = (scale_id == 1) ? pin_sck1 : pin_sck2;
-            // Lese 24-Bit Wert von HX711
-            return 0;  // Placeholder
+            HX711* hx = (scale_id == 1) ? hx711_1_ : hx711_2_;
+            if (!hx || !hx->is_ready()) return false;
+            raw = static_cast<int32_t>(hx->read());
+            return true;
         }
-        
+
+        // -------------------------------------------------------------------
         default:
-            return 0;
+            return false;
     }
 }

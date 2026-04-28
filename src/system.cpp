@@ -1,4 +1,7 @@
 #include "system.hpp"
+#include <core_pins.h>
+#include <usb_seremu.h>
+#include <usb_serial.h>
 
 System::System() {
     // Konstruktor
@@ -13,40 +16,14 @@ bool System::init() {
     
     printWelcomeBanner();
     
-    // Initialisiere Logger zuerst
-    if (!logger.init("MAGGIE_001")) {
-        Serial.println("WARNING: Logging initialization failed");
-    }
-    
-    // Initialisiere Mission Control
-    if (!mission_control.init()) {
-        Serial.println("FATAL: Mission Control initialization failed!");
-        return false;
-    }
     
     system_healthy = true;
-    logger.logMessage("INFO", "System initialization complete");
     
     return true;
 }
 
 void System::run() {
     if (!system_healthy) return;
-    
-    // Hauptkontroll-Loop
-    mission_control.run();
-}
-
-MissionControl* System::getMissionControl() {
-    return &mission_control;
-}
-
-LoggingService* System::getLoggingService() {
-    return &logger;
-}
-
-uint32_t System::getUptimeMs() const {
-    return millis() - startup_time;
 }
 
 void System::printWelcomeBanner() {

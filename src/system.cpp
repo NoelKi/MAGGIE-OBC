@@ -3,12 +3,20 @@
 #include <usb_seremu.h>
 #include <usb_serial.h>
 
+// ===========================================================================
+// Sensor Read Intervals (in milliseconds)
+// ===========================================================================
+#define WEIGHT_READ_INTERVAL_MS 500     ///< Read weight every 500ms
+#define FORCE_READ_INTERVAL_MS 100      ///< Read force every 100ms
+#define WEIGHT_CALIBRATION_FACTOR 1.0f  ///< Calibration factor for HX711
+
 System::System() {
     // Konstruktor
 }
 
 System::~System() {
     delete weight_sensor_;
+    delete force_sensor_2_;
 }
 
 bool System::init() {
@@ -38,6 +46,24 @@ bool System::init() {
     Serial.println("INFO  [System]: Gewichtssensor bereit.");
 
     // -----------------------------------------------------------------------
+    // Kraftsensor 2 (Custom Analog Sensor)
+    // -----------------------------------------------------------------------
+    Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (Analog)...");
+    force_sensor_2_ = new ForceSensorHAL(
+        FORCE_SENSOR_2_X_PIN,
+        FORCE_SENSOR_2_Y_PIN,
+        FORCE_SENSOR_2_Z_PIN
+    );
+
+    if (!force_sensor_2_->init()) {
+        Serial.println("ERROR [System]: Kraftsensor 2 konnte nicht initialisiert werden!");
+        system_healthy = false;
+        return false;
+    }
+
+    Serial.println("INFO  [System]: Kraftsensor 2 bereit.");
+
+    // -----------------------------------------------------------------------
 
     system_healthy = true;
     Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
@@ -54,6 +80,12 @@ void System::run() {
         last_weight_read_ms_ = now;
         handleWeightReading();
     }
+
+    // Kraftsensor periodisch auslesen und ausgeben
+    if (now - last_force_read_ms_ >= FORCE_READ_INTERVAL_MS) {
+        last_force_read_ms_ = now;
+        handleForceReading();
+    }
 }
 
 void System::handleWeightReading() {
@@ -65,6 +97,22 @@ void System::handleWeightReading() {
                       r.weight, static_cast<long>(r.raw_value));
     } else {
         Serial.println("[WEIGHT] Lesefehler – Sensor nicht bereit!");
+    }
+    Serial.println("---");
+}
+
+void System::handleForceReading() {
+    if (!force_sensor_2_) return;
+
+    ForceSensorReading reading;
+    if (force_sensor_2_->read(reading)) {
+        Serial.printf("[FORCE]  X: %8.2f  |  Y: %8.2f  |  Z: %8.2f  |  raw(X/Y/Z): %ld/%ld/%ld\n",
+                      reading.force_x, reading.force_y, reading.force_z,
+                      static_cast<long>(reading.raw_x),
+                      static_cast<long>(reading.raw_y),
+                      static_cast<long>(reading.raw_z));
+    } else {
+        Serial.println("[FORCE] Lesefehler – Sensor nicht bereit!");
     }
     Serial.println("---");
 }

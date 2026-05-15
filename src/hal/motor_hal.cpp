@@ -7,11 +7,12 @@ MotorHAL::MotorHAL(uint8_t pin_a, uint8_t pin_b, uint8_t motor_id)
 bool MotorHAL::init() {
     pinMode(pin_a_, OUTPUT);
     pinMode(pin_b_, OUTPUT);
-    
-    // Set both channels to 0 (stop)
+
+    setPWMFrequency(20000); // above audible range, within DRV8871 spec
+
     analogWrite(pin_a_, 0);
     analogWrite(pin_b_, 0);
-    
+
     initialized_ = true;
     return true;
 }
@@ -45,9 +46,6 @@ void MotorHAL::stop() {
 }
 
 void MotorHAL::setPWMFrequency(uint32_t frequency) {
-    // Teensy 4.1 PWM frequency control
-    // This is a simplified version; actual implementation may vary
-    // based on the pin and timer used
-    // For now, this is a placeholder
-    (void)frequency;
+    analogWriteFrequency(pin_a_, frequency);
+    analogWriteFrequency(pin_b_, frequency);
 }

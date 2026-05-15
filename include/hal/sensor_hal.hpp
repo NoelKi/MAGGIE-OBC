@@ -74,10 +74,14 @@ constexpr uint8_t MOTOR_3_A_PIN = PIN_M3_A;  // Pin 18
 constexpr uint8_t MOTOR_3_B_PIN = PIN_M3_B;  // Pin 19
 
 // ===========================================================================
-// LED Control
+// LED Control (RGB) — TODO: assign actual R/G/B pins in pin_config.hpp
 // ===========================================================================
-constexpr uint8_t LED_PWM_1_PIN = PIN_LED_PWM_1;  // Pin 5
-constexpr uint8_t LED_PWM_2_PIN = PIN_LED_PWM_2;  // Pin 6
+constexpr uint8_t LED1_R_PIN = PIN_LED_PWM_1;   ///< TODO: R-Kanal LED 1
+constexpr uint8_t LED1_G_PIN = PIN_LED_PWM_1;   ///< TODO: G-Kanal LED 1
+constexpr uint8_t LED1_B_PIN = PIN_LED_PWM_1;   ///< TODO: B-Kanal LED 1
+constexpr uint8_t LED2_R_PIN = PIN_LED_PWM_2;   ///< TODO: R-Kanal LED 2
+constexpr uint8_t LED2_G_PIN = PIN_LED_PWM_2;   ///< TODO: G-Kanal LED 2
+constexpr uint8_t LED2_B_PIN = PIN_LED_PWM_2;   ///< TODO: B-Kanal LED 2
 
 // ===========================================================================
 // REXUS Signals

@@ -61,5 +61,3 @@ private:
     uint32_t baudrate_ = 115200;
     bool initialized_ = false;
 };
-
-#endif /* UART_HAL_HPP */

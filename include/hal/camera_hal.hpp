@@ -69,5 +69,3 @@ private:
     uint8_t camera_id_;
     bool initialized_ = false;
 };
-
-#endif /* CAMERA_HAL_HPP */

@@ -1,0 +1,208 @@
+@startuml MAGGIE_RexusStateMachine
+' ============================================================
+'  MAGGIE — REXUS Experiment State Machine
+'  Gecko-Docking, Open-Loop, Microgravity-Fenster ~120 s
+'
+'  Editieren:
+'   - Zustände        : "state NAME <<phase>>" + Zeilen "NAME : text"
+'   - Phasen-Farben   : skinparam-Block unten (Stereotypen <<pre>>,
+'                       <<flight>>, <<exp>>, <<safe>>, <<abort>>)
+'   - Übergänge       : Source --> Target : "Bedingung"
+'   - Konstanten      : Note ganz unten (Single Source of Truth)
+'   - Layout breit    : "left to right direction" einkommentieren
+'
+'  Rendern:
+'   - VS Code   : Extension "PlantUML" (jebbs) + Java + Graphviz
+'   - Online    : https://www.plantuml.com/plantuml/uml
+'   - CLI       : plantuml maggie_state_machine.puml -tsvg
+' ============================================================
+
+title MAGGIE — REXUS Experiment State Machine
+
+' ' left to right direction
+
+' ---------- globales Styling ----------
+skinparam shadowing false
+skinparam roundCorner 12
+skinparam state {
+  FontName        "Helvetica"
+  FontSize        13
+  AttributeFontSize 11
+  BorderThickness 1.5
+  BackgroundColor White
+  BorderColor     #2563eb
+  ArrowColor      #111827
+  ArrowFontSize   11
+  ArrowFontColor  #111827
+}
+
+' ---------- Phasen-Farben über Stereotypen ----------
+skinparam state {
+  BorderColor<<pre>>      #6b7280
+  BorderColor<<flight>>   #2563eb
+  BorderColor<<exp>>      #16a34a
+  BorderColor<<safe>>     #0891b2
+  BorderColor<<abort>>    #dc2626
+  BackgroundColor<<abort>> #FEE2E2
+}
+
+[*] --> PRE_LAUNCH
+
+' ============================================================
+'  Pre-Flight
+' ============================================================
+state PRE_LAUNCH <<pre>>
+PRE_LAUNCH : S0 · Idle, Selbsttests
+PRE_LAUNCH : SODS aus
+
+state ARMED <<pre>>
+ARMED : S1 · Datalogger ein
+ARMED : Aktoren safe
+
+PRE_LAUNCH --> ARMED  : SODS = HIGH\n(T-600 s typ.)
+ARMED      --> ASCENT : LO = HIGH\n(T = 0 s)
+
+' ============================================================
+'  Flight
+' ============================================================
+state ASCENT <<flight>>
+ASCENT : S2 · Boost, Vibration
+ASCENT : Sensoren loggen
+
+state MG_VERIFY <<flight>>
+MG_VERIFY : S3 · IMU prüft
+MG_VERIFY : Microgravity
+
+ASCENT    --> MG_VERIFY : SOE = HIGH\n(T+~70 s)
+MG_VERIFY --> WAIT_FFU  : |a_imu| < IMU_g_thr\nfür ≥ IMU_t_thr
+
+' ============================================================
+'  Experiment
+' ============================================================
+state WAIT_FFU <<exp>>
+WAIT_FFU : S4 · Timer ab SOE
+WAIT_FFU : (FFU-Abwurf abwarten)
+
+state HDRM_OPEN <<exp>>
+HDRM_OPEN : S5 · Aktuator
+HDRM_OPEN : löst aus
+
+state ARM_DEPLOY <<exp>>
+ARM_DEPLOY : S6 · Start
+ARM_DEPLOY : home → pre-approach
+
+WAIT_FFU    --> HDRM_OPEN   : t_seit_SOE ≥ T_FFU
+HDRM_OPEN   --> ARM_DEPLOY  : hdrm_open_sw\n∨ t > 3 s
+ARM_DEPLOY  --> APPROACH_T1 : ‖q - q_pre‖ < ε\n∧ arm_state = READY
+
+' ---------- Docking-Zyklus Target 1 ----------
+state "Docking Target 1" as Dock1 {
+  state APPROACH_T1 <<exp>>
+  APPROACH_T1 : S7 · Open-loop
+  APPROACH_T1 : Trajektorie T1
+
+  state DOCK_T1 <<exp>>
+  DOCK_T1 : S8 · Halten
+  DOCK_T1 : Wegezelle + Cams
+
+  state RETRACT_T1 <<exp>>
+  RETRACT_T1 : S9 · Reverse-Traj.
+  RETRACT_T1 : F → 0
+
+  APPROACH_T1 --> DOCK_T1    : F_load_T1 > F_thresh\n∨ Trajektorie fertig
+  DOCK_T1     --> RETRACT_T1 : t_hold ≥ 3 s\n(Messdaten ok)
+}
+
+RETRACT_T1 --> APPROACH_T2 : ‖q - q_pre‖ < ε\n∧ F_load_T1 ≈ 0
+
+' ---------- Docking-Zyklus Target 2 ----------
+state "Docking Target 2" as Dock2 {
+  state APPROACH_T2 <<exp>>
+  APPROACH_T2 : S10 · Open-loop
+  APPROACH_T2 : Trajektorie T2
+
+  state DOCK_T2 <<exp>>
+  DOCK_T2 : S11 · Halten
+  DOCK_T2 : Wegezelle + Cams
+
+  state RETRACT_T2 <<exp>>
+  RETRACT_T2 : S12 · Reverse-Traj.
+  RETRACT_T2 : F → 0
+
+  APPROACH_T2 --> DOCK_T2    : F_load_T2 > F_thresh\n∨ Trajektorie fertig
+  DOCK_T2     --> RETRACT_T2 : t_hold ≥ 3 s\n(Messdaten ok)
+}
+
+RETRACT_T2 --> ARM_STOW : ‖q - q_pre‖ < ε\n∧ F_load_T2 ≈ 0
+
+' ============================================================
+'  Safing
+' ============================================================
+state ARM_STOW <<safe>>
+ARM_STOW : S13 · Arm in
+ARM_STOW : HDRM-Konfiguration
+
+state HDRM_CLOSE <<safe>>
+HDRM_CLOSE : S14 · Mechanismus
+HDRM_CLOSE : schließt um Arm
+
+state NET_DEPLOY <<safe>>
+NET_DEPLOY : S15 · Redundantes
+NET_DEPLOY : Sicherungsnetz
+
+state SAFE <<safe>>
+SAFE : S16 · Telemetrie weiter
+SAFE : Aktoren aus
+
+ARM_STOW   --> HDRM_CLOSE : ‖q - q_stow‖ < ε\n∧ arm idle
+HDRM_CLOSE --> NET_DEPLOY : hdrm_closed_sw\n∨ t > 3 s
+NET_DEPLOY --> SAFE       : net_deployed_sw\n∨ t > 2 s
+SAFE       --> [*]
+
+' ============================================================
+'  Abort-Pfad — erreichbar aus jedem Zustand
+' ============================================================
+state ABORT <<abort>>
+ABORT : S_E · Arm stop, HDRM zu wenn möglich,
+ABORT : Netz immer auslösen, Daten weiter loggen
+
+MG_VERIFY    -[#dc2626,dashed]-> ABORT : Watchdog timeout\n∨ IMU-Plausi-Fail
+HDRM_OPEN    -[#dc2626,dashed]-> ABORT : hdrm_open_sw fail\n∨ Power-Brownout
+ARM_DEPLOY   -[#dc2626,dashed]-> ABORT : arm_state = ERROR
+APPROACH_T1  -[#dc2626,dashed]-> ABORT : F_load > F_max\n∨ arm error
+DOCK_T1      -[#dc2626,dashed]-> ABORT : F_load > F_max
+APPROACH_T2  -[#dc2626,dashed]-> ABORT : F_load > F_max\n∨ arm error
+DOCK_T2      -[#dc2626,dashed]-> ABORT : F_load > F_max
+HDRM_CLOSE   -[#dc2626,dashed]-> ABORT : hdrm_closed_sw fail
+ABORT        -[#dc2626]->        SAFE  : Safing-Sequenz fertig
+
+note right of ABORT
+  **Globale Trigger** (gelten in jedem Zustand):
+  • Watchdog timeout
+  • Power-Brownout
+  • Operator-Abort (Uplink)
+  • IMU-Plausi-Fail
+  • Force-Überschreitung (F_load > F_max)
+  • Harter Cutoff:  t > T_HARD_CUT
+end note
+
+' ============================================================
+'  Konfiguration / Konstanten  (Single Source of Truth)
+' ============================================================
+note bottom of SAFE
+  **KONFIG — Konstanten (im Code als Parameter):**
+  T_FFU       = 10 s        (Wartezeit ab SOE bis HDRM_OPEN)
+  IMU_g_thr   = 0.05 g      (Microgravity-Schwelle)
+  IMU_t_thr   = 500 ms      (Halte-Zeit unter Schwelle)
+  F_thresh    = 0.5 N       (Kontakt-Erkennung Wegezelle)
+  F_max       = 5.0 N       (Force-Limit → Abort)
+  t_hold      = 3 s         (Halte-Zeit im DOCK)
+  T_HARD_CUT  = SOE + 100 s (Erzwungener Übergang nach ARM_STOW)
+  ε (pose)    = 1°  / 2 mm  (Pose-Toleranz)
+
+  **Phasen-Farben:**
+  Pre-Flight = grau · Flight = blau · Experiment = grün
+  Safing = cyan · Abort = rot (gestrichelt)
+end note
+
+@enduml

@@ -208,7 +208,7 @@ note bottom of SAFE
   T_HARD_CUT    = t_µg + 100 s (Erzwungener Übergang nach ARM_STOW)
   // — Docking
   F_thresh      = 0.2 N        (Kontakt-Erkennung Wegezelle)
-  F_max         = 0.5 N        (Force-Limit → Abort)
+  F_max         = 5 N        (Force-Limit → Abort)
   t_hold        = 3 s          (Halte-Zeit im DOCK)
 
   // — Telemetrie-Flag

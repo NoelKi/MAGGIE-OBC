@@ -174,6 +174,9 @@ bool IMUHAL::read(IMUReading& reading) {
     reading.accel_x = static_cast<float>(ax) * ACCEL_SCALE;
     reading.accel_y = static_cast<float>(ay) * ACCEL_SCALE;
     reading.accel_z = static_cast<float>(az) * ACCEL_SCALE;
+    reading.raw_accel_x = ax;
+    reading.raw_accel_y = ay;
+    reading.raw_accel_z = az;
 
     // Gyroscope
     gyroReadBytes(GYR_DATA_START, raw, 6);
@@ -183,6 +186,9 @@ bool IMUHAL::read(IMUReading& reading) {
     reading.gyro_x = static_cast<float>(gx) * GYRO_SCALE;
     reading.gyro_y = static_cast<float>(gy) * GYRO_SCALE;
     reading.gyro_z = static_cast<float>(gz) * GYRO_SCALE;
+    reading.raw_gyro_x = gx;
+    reading.raw_gyro_y = gy;
+    reading.raw_gyro_z = gz;
 
     reading.timestamp = millis();
     reading.valid = true;

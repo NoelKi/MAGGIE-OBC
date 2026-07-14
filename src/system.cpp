@@ -8,7 +8,9 @@
 // ===========================================================================
 #define WEIGHT_READ_INTERVAL_MS 500     ///< Read weight every 500ms
 #define FORCE_READ_INTERVAL_MS 100      ///< Read force every 100ms
+#define TELEMETRY_INTERVAL_MS 50        ///< Send IMU downlink every 50ms (20 Hz)
 #define WEIGHT_CALIBRATION_FACTOR 1.0f  ///< Calibration factor for HX711
+#define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial8, pins 34/35)
 
 System::System() {
     // Konstruktor
@@ -17,6 +19,8 @@ System::System() {
 System::~System() {
     delete weight_sensor_;
     delete force_sensor_2_;
+    delete imu_;
+    delete downlink_;
 }
 
 bool System::init() {
@@ -64,6 +68,31 @@ bool System::init() {
     Serial.println("INFO  [System]: Kraftsensor 2 bereit.");
 
     // -----------------------------------------------------------------------
+    // IMU (BMI088 ueber SPI) - fuer Telemetrie-Downlink
+    // Fehler hier sind NICHT fatal: das System laeuft ohne Telemetrie weiter.
+    // -----------------------------------------------------------------------
+    Serial.println("INFO  [System]: Initialisiere IMU (BMI088)...");
+    imu_ = new IMUHAL(PIN_CS_ACCEL, PIN_CS_GYRO, 0 /* SPI0 */);
+    imu_ready_ = imu_->init();
+    if (imu_ready_) {
+        Serial.println("INFO  [System]: IMU bereit.");
+    } else {
+        Serial.println("WARN  [System]: IMU konnte nicht initialisiert werden - Telemetrie ohne IMU.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Telemetrie-Downlink (Serial8, Pins 34 RX / 35 TX)
+    // -----------------------------------------------------------------------
+    Serial.println("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial8, Pin 34/35)...");
+    downlink_ = new TelemetryDownlink(Serial8);
+    downlink_ready_ = downlink_->init(DOWNLINK_BAUDRATE);
+    if (downlink_ready_) {
+        Serial.println("INFO  [System]: Downlink bereit (38400 Baud).");
+    } else {
+        Serial.println("WARN  [System]: Downlink konnte nicht initialisiert werden.");
+    }
+
+    // -----------------------------------------------------------------------
 
     system_healthy = true;
     Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
@@ -86,6 +115,25 @@ void System::run() {
         last_force_read_ms_ = now;
         handleForceReading();
     }
+
+    // Telemetrie-Downlink periodisch senden
+    if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
+        last_telemetry_ms_ = now;
+        handleTelemetry();
+    }
+}
+
+void System::handleTelemetry() {
+    if (!downlink_ready_ || !imu_ready_ || !imu_ || !downlink_) return;
+
+    IMUReading reading;
+    if (!imu_->read(reading)) return;
+
+    uint8_t status1 = 0;
+    if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
+    if (reading.valid)  status1 |= DL_STATUS1_IMU_VALID;
+
+    downlink_->sendImu(reading, status1, 0);
 }
 
 void System::handleWeightReading() {

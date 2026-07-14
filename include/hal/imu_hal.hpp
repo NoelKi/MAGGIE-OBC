@@ -11,6 +11,15 @@ struct IMUReading {
     float gyro_x;
     float gyro_y;
     float gyro_z;
+    // Native 16-bit sensor counts (before scaling) - used for telemetry downlink
+    // so the full sensor resolution is preserved and the ground station applies
+    // the documented scale factors.
+    int16_t raw_accel_x;
+    int16_t raw_accel_y;
+    int16_t raw_accel_z;
+    int16_t raw_gyro_x;
+    int16_t raw_gyro_y;
+    int16_t raw_gyro_z;
     uint32_t timestamp;
     bool valid;
 };

@@ -3,6 +3,13 @@
 
 namespace {
 
+/// Zustände, in denen der Arm Kontakt zum Target hat und das Force-Limit
+/// überhaupt physikalisch sinnvoll ist (siehe checkGlobalAbort).
+bool isDockingState(MissionState s) {
+    return s == MissionState::APPROACH_T1 || s == MissionState::SUCCESS_T1 ||
+           s == MissionState::APPROACH_T2 || s == MissionState::SUCCESS_T2;
+}
+
 const char* toString(MissionState s) {
     switch (s) {
         case MissionState::PRE_LAUNCH:   return "PRE_LAUNCH";
@@ -72,10 +79,19 @@ void StateMachine::update(uint32_t now_ms, const StateMachineInputs& in) {
 }
 
 bool StateMachine::checkGlobalAbort(const StateMachineInputs& in, uint32_t now_ms) {
-    if (state_ == MissionState::ABORT) return false;
+    if (state_ == MissionState::ABORT || state_ == MissionState::SAFE) return false;
 
-    if (in.watchdog_timeout || in.power_brownout || in.operator_abort ||
-        in.force_load_n > MissionConfig::F_MAX_N) {
+    if (in.watchdog_timeout || in.power_brownout || in.operator_abort) {
+        transitionTo(MissionState::ABORT, now_ms);
+        return true;
+    }
+
+    // F_load > F_max im Notiz-Block als
+    // globalen Trigger, hat aber zusätzlich explizite Force-Abort-Pfeile NUR an
+    // APPROACH_T1/T2 und SUCCESS_T1/T2. Global geprüft würden die Aufstiegs-
+    // lasten (Boost, mehrere g) das 5-N-Limit sofort reißen und die Mission
+    // schon im ASCENT abbrechen. Daher hier bewusst nur in den Docking-Zuständen.
+    if (isDockingState(state_) && in.force_load_n > MissionConfig::F_MAX_N) {
         transitionTo(MissionState::ABORT, now_ms);
         return true;
     }
@@ -132,7 +148,9 @@ void StateMachine::handleMgDetect(const StateMachineInputs& in, uint32_t now_ms)
 
     if (imuBelowThreshold(in, now_ms)) {
         mg_source_ = MgSource::IMU_ONLY;
-        t_ug_ms_ = now_ms;
+        // t_µg ist der Zeitpunkt des Schwellen-Übertritts, NICHT der Zeitpunkt,
+        // an dem die Debounce-Dauer IMU_T_THR_MS abgelaufen ist.
+        t_ug_ms_ = imu_below_thr_since_ms_;
         mg_confirm_enter_ms_ = now_ms;
         transitionTo(MissionState::MG_CONFIRM, now_ms);
     }
@@ -144,7 +162,9 @@ void StateMachine::handleMgConfirm(const StateMachineInputs& in, uint32_t now_ms
 
     if (second_source_is_soe || second_source_is_imu) {
         mg_source_ = MgSource::BOTH;
-        if (second_source_is_imu) t_ug_ms_ = now_ms;
+        // Diagramm: "t_µg := t_IMU (präziser)" - also der Zeitpunkt des
+        // Schwellen-Übertritts, nicht der der Bestätigung.
+        if (second_source_is_imu) t_ug_ms_ = imu_below_thr_since_ms_;
         transitionTo(MissionState::WAIT_FFU, now_ms);
         return;
     }

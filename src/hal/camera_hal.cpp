@@ -49,7 +49,14 @@ size_t CameraHAL::sendCommand(const uint8_t* command, size_t length) {
 
 size_t CameraHAL::receiveData(uint8_t* buffer, size_t max_length) {
     if (!initialized_ || !serial_ || !buffer) return 0;
-    return serial_->readBytes(buffer, max_length);
+
+    size_t count = 0;
+    while (count < max_length && serial_->available() > 0) {
+        const int c = serial_->read();
+        if (c < 0) break;
+        buffer[count++] = static_cast<uint8_t>(c);
+    }
+    return count;
 }
 
 bool CameraHAL::available() {

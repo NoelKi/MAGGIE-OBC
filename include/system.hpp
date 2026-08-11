@@ -5,6 +5,7 @@
 #include "hal/sensor_hal.hpp"
 #include "hal/imu_hal.hpp"
 #include "hal/telemetry_hal.hpp"
+#include "camera_config.hpp"
 #include "pin_config.hpp"
 
 /**
@@ -41,6 +42,7 @@ private:
     ForceSensorHAL* force_sensor_2_ = nullptr;         ///< Custom Force Sensor (Sensor 2)
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
     TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial8, pins 34/35)
+    CameraHAL* cameras_[CAMERA_COUNT] = {};             ///< siehe camera_config.hpp für die Liste
 
     uint32_t last_weight_read_ms_ = 0;      ///< Zeitstempel des letzten Weight-Auslesens
     uint32_t last_force_read_ms_ = 0;       ///< Zeitstempel des letzten Force-Auslesens
@@ -53,6 +55,7 @@ private:
     void handleWeightReading();
     void handleForceReading();
     void handleTelemetry();
+    void handleCameras(uint32_t now_ms);
 };
 
 // Externe System-Instanz (definiert in main.cpp)

@@ -1,45 +1,71 @@
 #include "hal/camera_hal.hpp"
 
-CameraHAL::CameraHAL(uint8_t tx_pin, uint8_t rx_pin, uint8_t uart_port, uint8_t camera_id)
-    : tx_pin_(tx_pin), rx_pin_(rx_pin), uart_port_(uart_port), camera_id_(camera_id) {
+CameraHAL::CameraHAL(const CameraConfig& config)
+    : camera_id_(config.camera_id),
+      serial_(config.serial),
+      baudrate_(config.baudrate),
+      mode_(config.mode),
+      interval_ms_(config.interval_ms) {
 }
 
-bool CameraHAL::init(uint32_t baudrate) {
-    // Initialize UART for camera communication
-    // This is a placeholder - actual HW serial setup would go here
-    (void)baudrate;
-    
+bool CameraHAL::init() {
+    if (!serial_) {
+        // Kein UART-Port konfiguriert (siehe camera_config.hpp) - Kamera bleibt inaktiv.
+        initialized_ = false;
+        return false;
+    }
+    serial_->begin(baudrate_);
     initialized_ = true;
     return true;
 }
 
+void CameraHAL::update(uint32_t now_ms) {
+    if (!initialized_) return;
+
+    switch (mode_) {
+        case CameraTriggerMode::SNAPSHOT_INTERVAL:
+            if (interval_ms_ > 0 && (now_ms - last_trigger_ms_) >= interval_ms_) {
+                last_trigger_ms_ = now_ms;
+                captureSnapshot();
+            }
+            break;
+
+        case CameraTriggerMode::CONTINUOUS:
+            if (!continuous_started_) {
+                continuous_started_ = startRecording();
+            }
+            break;
+
+        case CameraTriggerMode::MANUAL_ONLY:
+        default:
+            break;
+    }
+}
+
 size_t CameraHAL::sendCommand(const uint8_t* command, size_t length) {
-    if (!initialized_ || !command) return 0;
-    
-    // Send command via UART
-    // Placeholder implementation
-    return length;
+    if (!initialized_ || !serial_ || !command) return 0;
+    return serial_->write(command, length);
 }
 
 size_t CameraHAL::receiveData(uint8_t* buffer, size_t max_length) {
-    if (!initialized_ || !buffer) return 0;
-    
-    // Receive data from camera via UART
-    // Placeholder implementation
-    return 0;
+    if (!initialized_ || !serial_ || !buffer) return 0;
+    return serial_->readBytes(buffer, max_length);
 }
 
 bool CameraHAL::available() {
-    if (!initialized_) return false;
-    
-    // Check if data is available in UART buffer
-    return false;
+    if (!initialized_ || !serial_) return false;
+    return serial_->available() > 0;
 }
 
-bool CameraHAL::captureImage() {
-    if (!initialized_) return false;
-    
-    // Send capture command to camera
-    // Placeholder implementation
-    return true;
+bool CameraHAL::startRecording() {
+    return sendCommand(CamCmd::START_RECORDING, sizeof(CamCmd::START_RECORDING)) > 0;
+}
+
+bool CameraHAL::stopRecording() {
+    continuous_started_ = false;
+    return sendCommand(CamCmd::STOP_RECORDING, sizeof(CamCmd::STOP_RECORDING)) > 0;
+}
+
+bool CameraHAL::captureSnapshot() {
+    return sendCommand(CamCmd::SNAPSHOT, sizeof(CamCmd::SNAPSHOT)) > 0;
 }

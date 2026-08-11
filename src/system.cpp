@@ -21,6 +21,9 @@ System::~System() {
     delete force_sensor_2_;
     delete imu_;
     delete downlink_;
+    for (auto* camera : cameras_) {
+        delete camera;
+    }
 }
 
 bool System::init() {
@@ -93,6 +96,25 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
+    // Kameras (Anzahl/Intervall siehe camera_config.hpp)
+    // Fehler hier sind NICHT fatal: einzelne Kameras können fehlen/ungeklärt sein.
+    // -----------------------------------------------------------------------
+    Serial.printf("INFO  [System]: Initialisiere %u Kamera(s)...\n", (unsigned)CAMERA_COUNT);
+    for (size_t i = 0; i < CAMERA_COUNT; ++i) {
+        cameras_[i] = new CameraHAL(CAMERA_CONFIGS[i]);
+        if (!cameras_[i]->isPresent()) {
+            Serial.printf("WARN  [System]: Kamera %u hat keinen UART-Port (siehe camera_config.hpp) - übersprungen.\n",
+                          cameras_[i]->getCameraID());
+            continue;
+        }
+        if (cameras_[i]->init()) {
+            Serial.printf("INFO  [System]: Kamera %u bereit.\n", cameras_[i]->getCameraID());
+        } else {
+            Serial.printf("WARN  [System]: Kamera %u konnte nicht initialisiert werden.\n", cameras_[i]->getCameraID());
+        }
+    }
+
+    // -----------------------------------------------------------------------
 
     system_healthy = true;
     Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
@@ -120,6 +142,16 @@ void System::run() {
     if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
         last_telemetry_ms_ = now;
         handleTelemetry();
+    }
+
+    // Kameras: jede Kamera entscheidet anhand ihres CameraTriggerMode selbst,
+    // ob gerade ein Kommando fällig ist (siehe camera_config.hpp).
+    handleCameras(now);
+}
+
+void System::handleCameras(uint32_t now_ms) {
+    for (auto* camera : cameras_) {
+        if (camera) camera->update(now_ms);
     }
 }
 

@@ -48,6 +48,12 @@ private:
     uint32_t last_force_read_ms_ = 0;       ///< Zeitstempel des letzten Force-Auslesens
     uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten Telemetrie-Downlinks
 
+    // Kein Subsystem-Fehler ist fatal: der OBC laeuft degradiert weiter, statt
+    // z.B. wegen eines fehlenden Wiegesensors Telemetrie und Kameras mit
+    // abzuschalten. system_healthy fasst zusammen, ob ALLE Subsysteme oben
+    // sind - das Bit geht per DL_STATUS1_SYSTEM_HEALTHY an die Bodenstation.
+    bool weight_sensor_ready_ = false;      ///< HX711 erfolgreich initialisiert
+    bool force_sensor_ready_ = false;       ///< Kraftsensor 2 erfolgreich initialisiert
     bool imu_ready_ = false;                ///< IMU erfolgreich initialisiert
     bool downlink_ready_ = false;           ///< Downlink-UART bereit
 

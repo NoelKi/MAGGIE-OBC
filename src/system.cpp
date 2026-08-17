@@ -40,17 +40,15 @@ bool System::init() {
         PIN_HX711_DOUT, PIN_HX711_SCK   // zweiter Kanal zeigt auf denselben Chip – wird nicht verwendet
     );
 
-    if (!weight_sensor_->init(ScaleType::HX711)) {
-        Serial.println("ERROR [System]: Gewichtssensor konnte nicht initialisiert werden!");
-        system_healthy = false;
-        return false;
+    weight_sensor_ready_ = weight_sensor_->init(ScaleType::HX711);
+    if (weight_sensor_ready_) {
+        // Kalibrierung und Tare
+        weight_sensor_->setCalibrationFactor(1, WEIGHT_CALIBRATION_FACTOR);
+        weight_sensor_->tareScale1();
+        Serial.println("INFO  [System]: Gewichtssensor bereit.");
+    } else {
+        Serial.println("WARN  [System]: Gewichtssensor nicht initialisiert - weiter ohne Gewichtsmessung.");
     }
-
-    // Kalibrierung und Tare
-    weight_sensor_->setCalibrationFactor(1, WEIGHT_CALIBRATION_FACTOR);
-    weight_sensor_->tareScale1();
-
-    Serial.println("INFO  [System]: Gewichtssensor bereit.");
 
     // -----------------------------------------------------------------------
     // Kraftsensor 2 (Custom Analog Sensor)
@@ -62,13 +60,12 @@ bool System::init() {
         FORCE_SENSOR_2_Z_PIN
     );
 
-    if (!force_sensor_2_->init()) {
-        Serial.println("ERROR [System]: Kraftsensor 2 konnte nicht initialisiert werden!");
-        system_healthy = false;
-        return false;
+    force_sensor_ready_ = force_sensor_2_->init();
+    if (force_sensor_ready_) {
+        Serial.println("INFO  [System]: Kraftsensor 2 bereit.");
+    } else {
+        Serial.println("WARN  [System]: Kraftsensor 2 nicht initialisiert - weiter ohne Kraftmessung.");
     }
-
-    Serial.println("INFO  [System]: Kraftsensor 2 bereit.");
 
     // -----------------------------------------------------------------------
     // IMU (BMI088 ueber SPI) - fuer Telemetrie-Downlink
@@ -115,15 +112,25 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
+    // Zusammenfassung. Der OBC startet auch dann, wenn einzelne Subsysteme
+    // fehlen - system_healthy meldet den Zustand nur an die Bodenstation.
+    // -----------------------------------------------------------------------
+    system_healthy = weight_sensor_ready_ && force_sensor_ready_ &&
+                     imu_ready_ && downlink_ready_;
 
-    system_healthy = true;
-    Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
+    if (system_healthy) {
+        Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
+    } else {
+        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - Gewicht:%s Kraft:%s IMU:%s Downlink:%s\n\n",
+                      weight_sensor_ready_ ? "OK" : "FEHLT",
+                      force_sensor_ready_  ? "OK" : "FEHLT",
+                      imu_ready_           ? "OK" : "FEHLT",
+                      downlink_ready_      ? "OK" : "FEHLT");
+    }
     return true;
 }
 
 void System::run() {
-    if (!system_healthy) return;
-
     const uint32_t now = millis();
 
     // Gewicht periodisch auslesen und ausgeben
@@ -169,7 +176,7 @@ void System::handleTelemetry() {
 }
 
 void System::handleWeightReading() {
-    if (!weight_sensor_) return;
+    if (!weight_sensor_ready_ || !weight_sensor_) return;
 
     ScaleReading r;
     if (weight_sensor_->readScale1(r)) {
@@ -182,7 +189,7 @@ void System::handleWeightReading() {
 }
 
 void System::handleForceReading() {
-    if (!force_sensor_2_) return;
+    if (!force_sensor_ready_ || !force_sensor_2_) return;
 
     ForceSensorReading reading;
     if (force_sensor_2_->read(reading)) {

@@ -5,76 +5,59 @@
 
 /**
  * @file state_machine.hpp
- * @brief MAGGIE Missions-Zustandsmaschine (Grundgerüst)
- *  TODO ins System integrieren und fehlende Komponenten implementieren
+ * @brief MAGGIE Missions-Zustandsmaschine (reduziertes Gerüst)
+ *
+ * Vollständiger Ablauf:
+ *   PRE_LAUNCH --SODS--> ARMED --LO--> ASCENT --SOE--> EXPERIMENT --Timer--> SAFE
+ *   jederzeit --Abort--> ABORT
+ *
+ * TODO: In System integrieren (REXUSHAL instanziieren, Inputs befüllen).
+ * TODO: Experimentsequenz in handleExperiment() füllen, sobald Arm/HDRM da sind.
  */
 
-// Sensordaten, die die Zustandsmaschine pro update()-Aufruf braucht
+/// Sensordaten pro update()-Aufruf. System liest sie aus den HALs - die
+/// State Machine kennt keine HAL-Objekte direkt.
 struct StateMachineInputs {
-    // REXUS-Signale, siehe REXUSHAL (aktuell nicht in System verdrahtet)
-    bool l0 = false;
-    bool soe = false;
-    bool sods = false;
+    // REXUS-Signale, siehe REXUSHAL
+    bool sods = false;   ///< Start of Data Storage (~T-600s) -> ARMED
+    bool l0   = false;   ///< Liftoff (T=0) -> ASCENT
+    bool soe  = false;   ///< Start of Experiment -> EXPERIMENT
 
-    // IMU, siehe IMUHAL::read() -> IMUReading
-    float imu_accel_magnitude_g = 1.0f;   ///< |a|; ~1g = Ruhe/Rampe, ~0g = Mikrogravitation
-
-    // TODO: welcher Sensor liefert das genau Force Sensor 2?
+    /// Last am Greifer. TODO: Quelle festlegen (Force Sensor 2 oder eigene Wegezelle).
     float force_load_n = 0.0f;
 
-    // Globale Abort-Trigger - TODO:
-    // reale Quellen existieren im Projekt noch nicht.
-    bool watchdog_timeout = false;   // TODO: keine Watchdog-HAL im Projekt
-    bool power_brownout = false;     // TODO: keine Spannungsüberwachung im Projekt
-    bool operator_abort = false;     // TODO: kein Uplink-Kommando-Parser im Projekt
+    /// Manueller Abbruch. TODO: es gibt noch keinen Uplink-Kommando-Parser.
+    bool operator_abort = false;
 };
 
 class StateMachine {
 public:
     StateMachine() = default;
 
-    // Setzt Startzustand (PRE_LAUNCH) und alle Timer zurück.
+    /// Setzt Startzustand (PRE_LAUNCH) und alle Timer zurück.
     void init();
 
-    // Einmal pro System::run()-Durchlauf aufrufen.
+    /// Einmal pro System::run()-Durchlauf aufrufen.
     void update(uint32_t now_ms, const StateMachineInputs& in);
 
     MissionState getState() const { return state_; }
-    MgSource getMgSource() const { return mg_source_; }
+
+    /// Zeit seit Liftoff in ms (0 solange LO noch nicht kam).
+    uint32_t getMissionTimeMs(uint32_t now_ms) const {
+        return (t_lo_ms_ == 0) ? 0 : (now_ms - t_lo_ms_);
+    }
 
 private:
     MissionState state_ = MissionState::PRE_LAUNCH;
-    MgSource mg_source_ = MgSource::NONE;
 
-    uint32_t t_lo_ms_ = 0;                  // Zeitpunkt LO=HIGH (T=0)
-    uint32_t t_ug_ms_ = 0;                  // Zeitpunkt Mikrogravitations-Erkennung (t_µg)
-    uint32_t mg_confirm_enter_ms_ = 0;      // Eintrittszeit in MG_CONFIRM (für T_xcheck)
-    uint32_t imu_below_thr_since_ms_ = 0;   // 0 = IMU aktuell nicht unter Schwelle
-    uint32_t state_enter_ms_ = 0;           // Eintrittszeit in den aktuellen Zustand (für spätere TODO-Timer nutzbar)
+    uint32_t t_lo_ms_  = 0;   ///< Zeitpunkt LO=HIGH (T=0); 0 = noch nicht gestartet
+    uint32_t t_soe_ms_ = 0;   ///< Zeitpunkt SOE=HIGH (Start Experimentfenster)
 
     void transitionTo(MissionState next, uint32_t now_ms);
-    bool checkGlobalAbort(const StateMachineInputs& in, uint32_t now_ms);
-    bool imuBelowThreshold(const StateMachineInputs& in, uint32_t now_ms);
+    bool checkAbort(const StateMachineInputs& in, uint32_t now_ms);
 
-    // Ein Handler pro Zustand 
     void handlePreLaunch(const StateMachineInputs& in, uint32_t now_ms);
     void handleArmed(const StateMachineInputs& in, uint32_t now_ms);
     void handleAscent(const StateMachineInputs& in, uint32_t now_ms);
-    void handleMgDetect(const StateMachineInputs& in, uint32_t now_ms);
-    void handleMgConfirm(const StateMachineInputs& in, uint32_t now_ms);
-    void handleWaitFfu(uint32_t now_ms);
-
-    // TODO: siehe Klassenkommentar oben - Zustände nur angelegt
-    void handleHdrmsOpen(const StateMachineInputs& in, uint32_t now_ms);
-    void handleArmDeploy(const StateMachineInputs& in, uint32_t now_ms);
-    void handleApproachT1(const StateMachineInputs& in, uint32_t now_ms);
-    void handleSuccessT1(const StateMachineInputs& in, uint32_t now_ms);
-    void handleApproachT2(const StateMachineInputs& in, uint32_t now_ms);
-    void handleSuccessT2(const StateMachineInputs& in, uint32_t now_ms);
-    void handleArmStow(const StateMachineInputs& in, uint32_t now_ms);
-    void handleSuccessStow(const StateMachineInputs& in, uint32_t now_ms);
-    void handleHdrmClose(const StateMachineInputs& in, uint32_t now_ms);
-    void handleNetDeploy(const StateMachineInputs& in, uint32_t now_ms);
-    void handleSafe();
-    void handleAbort();
+    void handleExperiment(uint32_t now_ms);
 };

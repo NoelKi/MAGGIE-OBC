@@ -32,8 +32,9 @@
  * All multi-byte fields are transmitted big-endian (most significant byte first).
  *
  * DATA layout per message type:
- *   IMU/ACCEL: [ax_hi ax_lo ay_hi ay_lo az_hi az_lo  0 0]  (int16 sensor counts)
- *   IMU/GYRO : [gx_hi gx_lo gy_hi gy_lo gz_hi gz_lo  0 0]  (int16 sensor counts)
+ *   IMU/ACCEL:   [ax_hi ax_lo ay_hi ay_lo az_hi az_lo  0 0]  (int16 sensor counts)
+ *   IMU/GYRO :   [gx_hi gx_lo gy_hi gy_lo gz_hi gz_lo  0 0]  (int16 sensor counts)
+ *   MOTOR/STATE: [pos(int32 BE) speed(int16 BE) state(uint8) 0]  (Encoder-Counts, PWM, Bits)
  *
  * The int16 values are the native BMI088 counts. The ground station applies
  * the documented scale factors:
@@ -51,7 +52,8 @@ static constexpr uint8_t DL_END   = 0x7F;
 
 // MSGID1 - subsystem / message category
 enum class DownlinkSubsystem : uint8_t {
-    IMU = 0x01,
+    IMU   = 0x01,
+    MOTOR = 0x02,
 };
 
 // MSGID2 - message type for the IMU subsystem
@@ -60,9 +62,19 @@ enum class DownlinkImuMsg : uint8_t {
     GYRO  = 0x02,
 };
 
+// MSGID2 - message type for the MOTOR subsystem
+enum class DownlinkMotorMsg : uint8_t {
+    STATE = 0x01,
+};
+
 // STATUS1 bit definitions
 static constexpr uint8_t DL_STATUS1_SYSTEM_HEALTHY = 0x01;  ///< bit0: system healthy
 static constexpr uint8_t DL_STATUS1_IMU_VALID      = 0x02;  ///< bit1: IMU reading valid
+
+// MOTOR/STATE - state byte bit definitions (DATA[6])
+static constexpr uint8_t DL_MOTOR_STATE_ON        = 0x01;  ///< bit0: motor dauerhaft an (on())
+static constexpr uint8_t DL_MOTOR_STATE_MOVING    = 0x02;  ///< bit1: Closed-Loop-Fahrt aktiv
+static constexpr uint8_t DL_MOTOR_STATE_AT_TARGET = 0x04;  ///< bit2: keine Fahrt aktiv / am Ziel
 
 class TelemetryDownlink {
 public:
@@ -89,6 +101,18 @@ public:
      * @param status2 STATUS2 byte
      */
     void sendImu(const IMUReading& reading, uint8_t status1 = 0, uint8_t status2 = 0);
+
+    /**
+     * @brief Send the current motor state as one MOTOR/STATE frame.
+     *
+     * @param position Encoder position in quadrature counts
+     * @param speed    Current signed PWM speed (-255..255)
+     * @param state    State bitfield (see DL_MOTOR_STATE_* flags)
+     * @param status1  STATUS1 byte (see DL_STATUS1_* flags)
+     * @param status2  STATUS2 byte
+     */
+    void sendMotor(int32_t position, int16_t speed, uint8_t state,
+                   uint8_t status1 = 0, uint8_t status2 = 0);
 
 private:
     HardwareSerial& serial_;

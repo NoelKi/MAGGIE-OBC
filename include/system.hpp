@@ -5,6 +5,8 @@
 #include "hal/sensor_hal.hpp"
 #include "hal/imu_hal.hpp"
 #include "hal/telemetry_hal.hpp"
+#include "hal/motor_hal.hpp"
+#include "hal/uplink_hal.hpp"
 #include "camera_config.hpp"
 #include "pin_config.hpp"
 
@@ -42,6 +44,8 @@ private:
     ForceSensorHAL* force_sensor_2_ = nullptr;         ///< Custom Force Sensor (Sensor 2)
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
     TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial8, pins 34/35)
+    MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871 + Encoder, Closed-Loop)
+    UplinkReceiver* uplink_ = nullptr;                 ///< Motor-Telecommand-Empfang (Serial8 RX)
     CameraHAL* cameras_[CAMERA_COUNT] = {};             ///< siehe camera_config.hpp für die Liste
 
     uint32_t last_weight_read_ms_ = 0;      ///< Zeitstempel des letzten Weight-Auslesens
@@ -56,11 +60,14 @@ private:
     bool force_sensor_ready_ = false;       ///< Kraftsensor 2 erfolgreich initialisiert
     bool imu_ready_ = false;                ///< IMU erfolgreich initialisiert
     bool downlink_ready_ = false;           ///< Downlink-UART bereit
+    bool motor_ready_ = false;              ///< Motor (inkl. Encoder) initialisiert
 
     void printWelcomeBanner();
     void handleWeightReading();
     void handleForceReading();
     void handleTelemetry();
+    void handleMotorTelemetry();
+    void handleUplink();
     void handleCameras(uint32_t now_ms);
 };
 

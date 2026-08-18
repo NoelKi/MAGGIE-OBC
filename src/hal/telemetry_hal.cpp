@@ -23,6 +23,14 @@ static inline void put_be16(uint8_t* buf, int16_t value) {
     buf[1] = static_cast<uint8_t>(value & 0xFF);
 }
 
+// Write a signed 32-bit value big-endian into buf[0..3].
+static inline void put_be32(uint8_t* buf, int32_t value) {
+    buf[0] = static_cast<uint8_t>((value >> 24) & 0xFF);
+    buf[1] = static_cast<uint8_t>((value >> 16) & 0xFF);
+    buf[2] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    buf[3] = static_cast<uint8_t>(value & 0xFF);
+}
+
 uint8_t TelemetryDownlink::crc8(const uint8_t* data, size_t len) {
     uint8_t crc = 0x00;
     for (size_t i = 0; i < len; i++) {
@@ -101,5 +109,21 @@ void TelemetryDownlink::sendImu(const IMUReading& reading,
     put_be16(&data[4], reading.raw_gyro_z);
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::IMU),
               static_cast<uint8_t>(DownlinkImuMsg::GYRO),
+              0, data, status1, status2);
+}
+
+void TelemetryDownlink::sendMotor(int32_t position, int16_t speed, uint8_t state,
+                                  uint8_t status1, uint8_t status2) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [pos(int32 BE) speed(int16 BE) state(uint8) spare]
+    put_be32(&data[0], position);
+    put_be16(&data[4], speed);
+    data[6] = state;
+    // data[7] reserved (0)
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::MOTOR),
+              static_cast<uint8_t>(DownlinkMotorMsg::STATE),
               0, data, status1, status2);
 }

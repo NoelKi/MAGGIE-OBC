@@ -93,6 +93,12 @@ static constexpr uint8_t PIN_M1_A = 15;        ///< Motor 1 Channel A
 // SCK
 static constexpr uint8_t PIN_SCK = 13;        ///< SCK
 
+// Motor 1 Quadratur-Encoder (A/B) - Closed-Loop Positionsregelung.
+// Freie, interrupt-fähige Teensy-4.1-Pins. NICHT 0/1 (ARM-UART) verwenden,
+// obwohl der Prototyp hardwareTest/motor.cpp dort verdrahtet war.
+static constexpr uint8_t PIN_M1_ENC_A = 16;    ///< Motor 1 Encoder Channel A
+static constexpr uint8_t PIN_M1_ENC_B = 17;    ///< Motor 1 Encoder Channel B
+
 // ===========================================================================
 // REXUS Signals
 // ===========================================================================

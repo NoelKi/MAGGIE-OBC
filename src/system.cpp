@@ -21,6 +21,8 @@ System::~System() {
     delete force_sensor_2_;
     delete imu_;
     delete downlink_;
+    delete motor_;
+    delete uplink_;
     for (auto* camera : cameras_) {
         delete camera;
     }
@@ -93,6 +95,25 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
+    // Motor 1 (DRV8871 + Quadratur-Encoder, Closed-Loop Positionsregelung)
+    // Fehler hier sind NICHT fatal: das System laeuft ohne Motor weiter.
+    // -----------------------------------------------------------------------
+    Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder)...");
+    motor_ = new MotorHAL(PIN_M1_A, PIN_M1_B, 1);
+    motor_ready_ = motor_->init();
+    if (motor_ready_) {
+        motor_->initEncoder(PIN_M1_ENC_A, PIN_M1_ENC_B);
+        Serial.println("INFO  [System]: Motor 1 bereit (Encoder Pin 16/17).");
+    } else {
+        Serial.println("WARN  [System]: Motor 1 konnte nicht initialisiert werden.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Uplink-Telecommand-Empfang (teilt sich Serial8 mit dem Downlink, Pin 34 RX)
+    // -----------------------------------------------------------------------
+    uplink_ = new UplinkReceiver(Serial8);
+
+    // -----------------------------------------------------------------------
     // Kameras (Anzahl/Intervall siehe camera_config.hpp)
     // Fehler hier sind NICHT fatal: einzelne Kameras können fehlen/ungeklärt sein.
     // -----------------------------------------------------------------------
@@ -133,6 +154,12 @@ bool System::init() {
 void System::run() {
     const uint32_t now = millis();
 
+    // Eingehende Motor-Telecommands verarbeiten (jeden Loop, geringe Latenz)
+    handleUplink();
+
+    // Closed-Loop-Positionsregelung des Motors einen Schritt weiterführen
+    if (motor_) motor_->update();
+
     // Gewicht periodisch auslesen und ausgeben
     if (now - last_weight_read_ms_ >= WEIGHT_READ_INTERVAL_MS) {
         last_weight_read_ms_ = now;
@@ -145,10 +172,11 @@ void System::run() {
         handleForceReading();
     }
 
-    // Telemetrie-Downlink periodisch senden
+    // Telemetrie-Downlink periodisch senden (IMU + Motor)
     if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
         last_telemetry_ms_ = now;
         handleTelemetry();
+        handleMotorTelemetry();
     }
 
     // Kameras: jede Kamera entscheidet anhand ihres CameraTriggerMode selbst,
@@ -173,6 +201,37 @@ void System::handleTelemetry() {
     if (reading.valid)  status1 |= DL_STATUS1_IMU_VALID;
 
     downlink_->sendImu(reading, status1, 0);
+}
+
+void System::handleMotorTelemetry() {
+    if (!downlink_ready_ || !motor_ready_ || !motor_ || !downlink_) return;
+
+    const int32_t position = static_cast<int32_t>(motor_->getPosition());
+    const int16_t speed    = motor_->getSpeed();
+
+    uint8_t state = 0;
+    if (motor_->isOn())     state |= DL_MOTOR_STATE_ON;
+    if (motor_->isMoving()) state |= DL_MOTOR_STATE_MOVING;
+    else                    state |= DL_MOTOR_STATE_AT_TARGET;
+
+    uint8_t status1 = 0;
+    if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
+
+    downlink_->sendMotor(position, speed, state, status1, 0);
+}
+
+void System::handleUplink() {
+    if (!uplink_ || !motor_ready_ || !motor_) return;
+
+    MotorCommand cmd;
+    while (uplink_->poll(cmd)) {
+        switch (static_cast<MotorOpcode>(cmd.opcode)) {
+            case MotorOpcode::ON:        motor_->on();       break;
+            case MotorOpcode::OFF:       motor_->off();      break;
+            case MotorOpcode::HALF_TURN: motor_->halfTurn(); break;
+            default: break;   // unbekanntes Kommando ignorieren
+        }
+    }
 }
 
 void System::handleWeightReading() {

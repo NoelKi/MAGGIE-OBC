@@ -47,6 +47,7 @@ private:
     MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871 + Encoder, Closed-Loop)
     UplinkReceiver* uplink_ = nullptr;                 ///< Motor-Telecommand-Empfang (Serial8 RX)
     CameraHAL* cameras_[CAMERA_COUNT] = {};             ///< siehe camera_config.hpp für die Liste
+    bool camera_reported_[CAMERA_COUNT] = {};           ///< Handshake-Ergebnis bereits geloggt?
 
     uint32_t last_weight_read_ms_ = 0;      ///< Zeitstempel des letzten Weight-Auslesens
     uint32_t last_force_read_ms_ = 0;       ///< Zeitstempel des letzten Force-Auslesens

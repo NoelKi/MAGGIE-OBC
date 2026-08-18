@@ -38,9 +38,10 @@ static constexpr uint8_t PIN_LED_PWM_2 = 6;    ///< LED PWM 2
 // ===========================================================================
 // Cameras
 // ===========================================================================
-// Camera 1 (UART2)
-static constexpr uint8_t PIN_CAM1_TX = 7;      ///< UART2 TX
-static constexpr uint8_t PIN_CAM_MAIN_RX = 8; ///< UART2 RX
+// Camera 1 (Serial2, RunCam Split 4, 115200 8N1)
+// Signalnamen aus Sicht der KAMERA: CAM..._TX = Ausgang der Kamera.
+static constexpr uint8_t PIN_CAM1_TX = 7;      ///< Teensy RX2  <- Kamera TX
+static constexpr uint8_t PIN_CAM_MAIN_RX = 8;  ///< Teensy TX2  -> Kamera RX
 
 // ===========================================================================
 // Force CLK 2
@@ -58,10 +59,11 @@ static constexpr uint8_t PIN_SPI1_MISO = 12;    ///< MISO
 // ===========================================================================
 // Cameras
 // ===========================================================================
-// Camera 1 (UART2)
-static constexpr uint8_t PIN_CAM_BACKUP_RX = 24;     
-static constexpr uint8_t PIN_CAM3_TX = 25; 
-static constexpr uint8_t PIN_CS_TEMP = 26; 
+// Camera 2 (Serial6, RunCam Split 4, 115200 8N1)
+static constexpr uint8_t PIN_CAM_BACKUP_RX = 24;  ///< Teensy TX6  -> Kamera RX
+static constexpr uint8_t PIN_CAM3_TX = 25;        ///< Teensy RX6  <- Kamera TX
+
+static constexpr uint8_t PIN_CS_TEMP = 26;
 
 // ===========================================================================
 // Force CLK 1

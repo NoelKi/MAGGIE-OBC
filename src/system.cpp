@@ -126,7 +126,10 @@ bool System::init() {
             continue;
         }
         if (cameras_[i]->init()) {
-            Serial.printf("INFO  [System]: Kamera %u bereit.\n", cameras_[i]->getCameraID());
+            // UART ist offen. Die Kamera selbst braucht nach dem Einschalten
+            // noch einige Sekunden - der Handshake läuft in handleCameras().
+            Serial.printf("INFO  [System]: Kamera %u UART geöffnet, warte auf Boot der Kamera...\n",
+                          cameras_[i]->getCameraID());
         } else {
             Serial.printf("WARN  [System]: Kamera %u konnte nicht initialisiert werden.\n", cameras_[i]->getCameraID());
         }
@@ -185,8 +188,25 @@ void System::run() {
 }
 
 void System::handleCameras(uint32_t now_ms) {
-    for (auto* camera : cameras_) {
-        if (camera) camera->update(now_ms);
+    for (size_t i = 0; i < CAMERA_COUNT; ++i) {
+        CameraHAL* camera = cameras_[i];
+        if (!camera) continue;
+
+        camera->update(now_ms);
+
+        // Ergebnis des Handshakes genau einmal melden.
+        if (camera_reported_[i] || camera->getState() != CameraState::READY) continue;
+        camera_reported_[i] = true;
+
+        if (camera->isDetected()) {
+            Serial.printf("INFO  [System]: Kamera %u erkannt (RunCam-Protokoll v%u, Features 0x%04X).\n",
+                          camera->getCameraID(), camera->getProtocolVersion(), camera->getFeatures());
+        } else {
+            // TX zur Kamera kann trotzdem funktionieren, deshalb kein Abbruch -
+            // Kommandos werden ab jetzt ohne Bestätigung gesendet.
+            Serial.printf("WARN  [System]: Kamera %u antwortet nicht (RX-Leitung prüfen) - sende blind weiter.\n",
+                          camera->getCameraID());
+        }
     }
 }
 

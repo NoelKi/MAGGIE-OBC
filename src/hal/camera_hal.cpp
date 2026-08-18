@@ -1,50 +1,58 @@
 #include "hal/camera_hal.hpp"
 
-CameraHAL::CameraHAL(const CameraConfig& config)
+CameraHAL::CameraHAL(const CameraConfig& config, CameraBus* bus)
     : camera_id_(config.camera_id),
-      serial_(config.serial),
-      baudrate_(config.baudrate),
+      channel_(config.mux_channel),
+      bus_(bus),
       model_(config.model),
       mode_(config.mode),
-      boot_delay_ms_(config.boot_delay_ms) {
+      boot_delay_ms_(config.boot_delay_ms),
+      enabled_(config.enabled) {
 }
 
 bool CameraHAL::init() {
-    if (!serial_) {
-        // Kein UART-Port konfiguriert (siehe camera_config.hpp) - Kamera bleibt inaktiv.
+    if (!enabled_ || !bus_ || !bus_->isReady() || channel_ >= CameraBus::MAX_CHANNELS) {
         state_ = CameraState::UNCONFIGURED;
         return false;
     }
 
-    serial_->begin(baudrate_);
-
     // Die Kamera braucht nach dem Einschalten mehrere Sekunden, bis ihr UART
     // antwortet. Vorher gesendete Kommandos gehen verloren, deshalb erst nach
-    // boot_delay_ms_ mit dem Handshake beginnen.
+    // boot_delay_ms_ mit dem Handshake beginnen. Alle Kameras booten
+    // gleichzeitig, die Wartezeit läuft also nur einmal für alle.
     init_ms_ = millis();
     state_ = CameraState::BOOTING;
     return true;
 }
 
 void CameraHAL::update(uint32_t now_ms) {
-    switch (state_) {
-        case CameraState::UNCONFIGURED:
+    if (state_ == CameraState::UNCONFIGURED) return;
+
+    if (state_ == CameraState::BOOTING) {
+        if ((now_ms - init_ms_) < boot_delay_ms_) return;
+        state_ = CameraState::DETECTING;
+        // Ersten Versuch sofort zulassen (Unterlauf ist hier gewollt).
+        last_probe_ms_ = now_ms - PROBE_INTERVAL_MS;
+    }
+
+    if (state_ == CameraState::DETECTING) {
+        if ((now_ms - last_probe_ms_) < PROBE_INTERVAL_MS) return;
+        last_probe_ms_ = now_ms;
+        ++probe_attempts_;
+
+        if (performHandshake()) {
+            device_detected_ = true;
+            state_ = CameraState::READY;
+        } else if (probe_attempts_ >= MAX_PROBE_ATTEMPTS) {
+            // Keine Antwort. Das kann an einer defekten RX-Leitung oder am Mux
+            // liegen, während TX zur Kamera funktioniert. Für einen einmaligen
+            // Flug ist es besser, die Kommandos trotzdem blind zu senden, als
+            // die Aufnahme zu verlieren. device_detected_ bleibt false und geht
+            // so in die Telemetrie.
+            state_ = CameraState::READY;
+        } else {
             return;
-
-        case CameraState::BOOTING:
-            if ((now_ms - init_ms_) >= boot_delay_ms_) {
-                requestDeviceInfo(now_ms);
-                state_ = CameraState::DETECTING;
-            }
-            return;
-
-        case CameraState::DETECTING:
-            pollDeviceInfo(now_ms);
-            if (state_ != CameraState::READY) return;
-            break;  // Im selben Durchlauf direkt weiter zum Auto-Trigger
-
-        case CameraState::READY:
-            break;
+        }
     }
 
     // Ab hier: state_ == READY
@@ -55,64 +63,63 @@ void CameraHAL::update(uint32_t now_ms) {
     }
 }
 
-void CameraHAL::requestDeviceInfo(uint32_t now_ms) {
-    rx_count_ = 0;
-    last_probe_ms_ = now_ms;
-    ++probe_attempts_;
-
-    // Alte/unvollständige Bytes aus dem Empfangspuffer werfen, damit die
-    // Antwort nicht durch Reste eines vorherigen Versuchs verschoben wird.
-    while (serial_->available() > 0) {
-        (void)serial_->read();
-    }
-
-    sendCommand(RunCam::Cmd::GET_DEVICE_INFO, nullptr, 0);
+bool CameraHAL::probe() {
+    if (state_ == CameraState::UNCONFIGURED) return false;
+    device_detected_ = performHandshake();
+    return device_detected_;
 }
 
-void CameraHAL::pollDeviceInfo(uint32_t now_ms) {
-    while (serial_->available() > 0 && rx_count_ < RunCam::DEVICE_INFO_RESPONSE_LENGTH) {
-        const int c = serial_->read();
-        if (c < 0) break;
+bool CameraHAL::performHandshake() {
+    if (!bus_ || !bus_->select(channel_)) return false;
+
+    HardwareSerial* serial = bus_->serial();
+    if (!serial) return false;
+
+    bus_->flushInput();
+    if (!sendCommand(RunCam::Cmd::GET_DEVICE_INFO, nullptr, 0)) return false;
+
+    // Blockierend lesen: der Mux-Kanal liegt nur JETZT an. Würde die Antwort
+    // über mehrere update()-Durchläufe eingesammelt, könnte zwischendurch eine
+    // andere Kamera den Bus umschalten und die Antwort ginge verloren.
+    uint8_t buffer[RunCam::DEVICE_INFO_RESPONSE_LENGTH] = {};
+    size_t count = 0;
+    const uint32_t deadline = millis() + RESPONSE_TIMEOUT_MS;
+
+    while (count < RunCam::DEVICE_INFO_RESPONSE_LENGTH &&
+           static_cast<int32_t>(millis() - deadline) < 0) {
+        if (serial->available() <= 0) continue;
+
+        const int c = serial->read();
+        if (c < 0) continue;
 
         // Auf den Header synchronisieren: alles vor 0xCC ist Müll.
-        if (rx_count_ == 0 && static_cast<uint8_t>(c) != RunCam::HEADER) continue;
+        if (count == 0 && static_cast<uint8_t>(c) != RunCam::HEADER) continue;
 
-        rx_buffer_[rx_count_++] = static_cast<uint8_t>(c);
+        buffer[count++] = static_cast<uint8_t>(c);
     }
 
-    if (rx_count_ == RunCam::DEVICE_INFO_RESPONSE_LENGTH) {
-        // CRC läuft über alle Bytes inkl. Header, das letzte Byte ist der CRC selbst.
-        const uint8_t crc = RunCam::crc8DvbS2Buffer(rx_buffer_,
-                                                    RunCam::DEVICE_INFO_RESPONSE_LENGTH - 1);
-        if (crc == rx_buffer_[RunCam::DEVICE_INFO_RESPONSE_LENGTH - 1]) {
-            protocol_version_ = rx_buffer_[1];
-            features_ = static_cast<uint16_t>(rx_buffer_[2]) |
-                        (static_cast<uint16_t>(rx_buffer_[3]) << 8);
-            device_detected_ = true;
-            state_ = CameraState::READY;
-            return;
-        }
-        // CRC falsch -> Antwort verwerfen und neu anfragen.
-        rx_count_ = 0;
-    }
+    if (count < RunCam::DEVICE_INFO_RESPONSE_LENGTH) return false;
 
-    if ((now_ms - last_probe_ms_) < PROBE_INTERVAL_MS) return;
+    // CRC läuft über alle Bytes inkl. Header, das letzte Byte ist der CRC selbst.
+    const uint8_t crc = RunCam::crc8DvbS2Buffer(buffer,
+                                                RunCam::DEVICE_INFO_RESPONSE_LENGTH - 1);
+    if (crc != buffer[RunCam::DEVICE_INFO_RESPONSE_LENGTH - 1]) return false;
 
-    if (probe_attempts_ >= MAX_PROBE_ATTEMPTS) {
-        // Keine Antwort. Das kann an einer fehlenden/defekten RX-Leitung liegen,
-        // während TX zur Kamera funktioniert. Für einen einmaligen Flug ist es
-        // besser, die Kommandos trotzdem blind zu senden, als die Aufnahme zu
-        // verlieren. device_detected_ bleibt false und geht so in die Telemetrie.
-        state_ = CameraState::READY;
-        return;
-    }
-
-    requestDeviceInfo(now_ms);
+    protocol_version_ = buffer[1];
+    features_ = static_cast<uint16_t>(buffer[2]) |
+                (static_cast<uint16_t>(buffer[3]) << 8);
+    return true;
 }
 
 bool CameraHAL::sendCommand(uint8_t command, const uint8_t* payload, size_t payload_length) {
-    if (!serial_ || state_ == CameraState::UNCONFIGURED) return false;
+    if (state_ == CameraState::UNCONFIGURED || !bus_) return false;
     if (payload_length + 3 > RunCam::MAX_TX_PACKET_LENGTH) return false;
+
+    // Ohne den richtigen Kanal ginge das Kommando an die falsche Kamera.
+    if (!bus_->select(channel_)) return false;
+
+    HardwareSerial* serial = bus_->serial();
+    if (!serial) return false;
 
     uint8_t packet[RunCam::MAX_TX_PACKET_LENGTH];
     size_t length = 0;
@@ -125,7 +132,11 @@ bool CameraHAL::sendCommand(uint8_t command, const uint8_t* payload, size_t payl
     packet[length] = RunCam::crc8DvbS2Buffer(packet, length);
     ++length;
 
-    return serial_->write(packet, length) == length;
+    if (serial->write(packet, length) != length) return false;
+
+    // Rausschreiben, bevor irgendjemand den Mux weiterschaltet.
+    serial->flush();
+    return true;
 }
 
 bool CameraHAL::sendControlAction(uint8_t action) {

@@ -38,10 +38,21 @@ static constexpr uint8_t PIN_LED_PWM_2 = 6;    ///< LED PWM 2
 // ===========================================================================
 // Cameras
 // ===========================================================================
-// Camera 1 (Serial2, RunCam Split 4, 115200 8N1)
+// 4x RunCam Split 4 (115200 8N1) an EINEM UART (Serial2). TX und RX werden
+// gemeinsam über einen 4:1-Mux auf die jeweilige Kamera geschaltet.
 // Signalnamen aus Sicht der KAMERA: CAM..._TX = Ausgang der Kamera.
-static constexpr uint8_t PIN_CAM1_TX = 7;      ///< Teensy RX2  <- Kamera TX
-static constexpr uint8_t PIN_CAM_MAIN_RX = 8;  ///< Teensy TX2  -> Kamera RX
+static constexpr uint8_t PIN_CAM1_TX = 7;      ///< Teensy RX2  <- Mux <- Kamera TX
+static constexpr uint8_t PIN_CAM_MAIN_RX = 8;  ///< Teensy TX2  -> Mux -> Kamera RX
+
+// Kanalwahl des Mux: Kanal = (CAMDIR2 << 1) | CAMDIR1, also 0..3 = Kamera 1..4.
+//
+// ACHTUNG - Doppelbelegung: Pin 19 und 22 sind in diesem Header zusätzlich als
+// PIN_M3_B bzw. PIN_M2_B vergeben. Motor 2 und 3 werden aktuell nirgends
+// instanziiert, der Konflikt ist also noch theoretisch. Beim Finalisieren der
+// Pinbelegung auflösen. Werte stammen aus
+// docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt (CAMDIR1 = 19, CAMDIR2 = 22).
+static constexpr uint8_t PIN_CAM_MUX_A = 19;   ///< CAMDIR1, LSB der Kanalwahl
+static constexpr uint8_t PIN_CAM_MUX_B = 22;   ///< CAMDIR2, MSB der Kanalwahl
 
 // ===========================================================================
 // Force CLK 2
@@ -59,9 +70,10 @@ static constexpr uint8_t PIN_SPI1_MISO = 12;    ///< MISO
 // ===========================================================================
 // Cameras
 // ===========================================================================
-// Camera 2 (Serial6, RunCam Split 4, 115200 8N1)
-static constexpr uint8_t PIN_CAM_BACKUP_RX = 24;  ///< Teensy TX6  -> Kamera RX
-static constexpr uint8_t PIN_CAM3_TX = 25;        ///< Teensy RX6  <- Kamera TX
+// Zweiter Kamera-UART (Serial6). Seit dem Mux-Aufbau nicht mehr belegt - alle
+// vier Kameras hängen an Serial2. Konstanten bleiben als Reserve stehen.
+static constexpr uint8_t PIN_CAM_BACKUP_RX = 24;  ///< Teensy TX6, ungenutzt
+static constexpr uint8_t PIN_CAM3_TX = 25;        ///< Teensy RX6, ungenutzt
 
 static constexpr uint8_t PIN_CS_TEMP = 26;
 

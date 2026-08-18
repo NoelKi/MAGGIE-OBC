@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <Arduino.h>
 
+#include "hal/camera_bus.hpp"
+
 /**
  * @file camera_hal.hpp
  * @brief RunCam Device Protocol (UART) für RunCam Split 4
@@ -13,6 +15,8 @@
  *   115200 Baud, 8N1, 3.3V TTL (Teensy 4.1 ist 3.3V - direkt kompatibel,
  *   KEIN Levelshifter nötig, Teensy-Pins sind aber NICHT 5V-tolerant!).
  *   Verdrahtung: Teensy TXn -> Kamera RX, Teensy RXn <- Kamera TX, GND gemeinsam.
+ *   Bei MAGGIE hängen 4 Kameras über einen 4:1-Mux an einem UART, siehe
+ *   camera_bus.hpp - immer nur eine Kamera ist gleichzeitig erreichbar.
  *   Kamera-Versorgung laut Handbuch DC 5-20V, >= 1A, NICHT direkt an der
  *   Batterie und nicht über den VTx (Spannungsspitzen zerstören die Kamera).
  *
@@ -62,6 +66,7 @@ namespace Cmd {
     static constexpr uint8_t KEY5_SIMULATION_PRESS  = 0x02;
     static constexpr uint8_t KEY5_SIMULATION_RELEASE= 0x03;
     static constexpr uint8_t KEY5_CONNECTION        = 0x04;
+    static constexpr uint8_t REQUEST_FC_ATTITUDE    = 0x50;
 }
 
 /// Action-IDs für Cmd::CAMERA_CONTROL (Byte 2 des Pakets).
@@ -84,6 +89,7 @@ namespace Feature {
     static constexpr uint16_t START_RECORDING        = 1u << 6;
     static constexpr uint16_t STOP_RECORDING         = 1u << 7;
     static constexpr uint16_t CMS_MENU               = 1u << 8;
+    static constexpr uint16_t FC_ATTITUDE            = 1u << 9;
 }
 
 /// Antwortlänge von GET_DEVICE_INFO: 0xCC, Version, Feature_lo, Feature_hi, CRC8.
@@ -138,17 +144,17 @@ enum class CameraTriggerMode : uint8_t {
 
 /// Interner Zustand des Boot-/Handshake-Ablaufs.
 enum class CameraState : uint8_t {
-    UNCONFIGURED,  ///< serial == nullptr, HAL tut nichts
+    UNCONFIGURED,  ///< Kamera deaktiviert oder kein Bus, HAL tut nichts
     BOOTING,       ///< Wartet boot_delay_ms nach dem Einschalten ab
-    DETECTING,     ///< GET_DEVICE_INFO gesendet, Antwort ausstehend
+    DETECTING,     ///< Handshake läuft (GET_DEVICE_INFO)
     READY,         ///< Kommandos werden gesendet
 };
 
 /// Konfiguration einer einzelnen Kamera (siehe camera_config.hpp).
 struct CameraConfig {
     uint8_t camera_id;
-    HardwareSerial* serial;   ///< nullptr = nicht angeschlossen, HAL bleibt inaktiv
-    uint32_t baudrate;
+    uint8_t mux_channel;      ///< 0..3, siehe CameraBus
+    bool enabled;             ///< false = nicht bestückt, HAL bleibt inaktiv
     RunCamModel model;
     CameraTriggerMode mode;
     uint32_t boot_delay_ms;   ///< Wartezeit nach Power-On, bevor der UART antwortet
@@ -164,10 +170,14 @@ public:
     static constexpr uint8_t MAX_PROBE_ATTEMPTS = 5;
     /// Mindestabstand zwischen zwei Steuerkommandos (schützt vor Doppel-Toggle).
     static constexpr uint32_t MIN_CONTROL_INTERVAL_MS = 500;
+    /// Wartezeit auf die Handshake-Antwort. 5 Byte brauchen bei 115200 Baud
+    /// gut 0,4 ms; die Kamera antwortet innerhalb weniger Millisekunden.
+    static constexpr uint32_t RESPONSE_TIMEOUT_MS = 50;
 
-    explicit CameraHAL(const CameraConfig& config);
+    CameraHAL(const CameraConfig& config, CameraBus* bus);
 
-    /// Öffnet den UART. false, wenn kein Port konfiguriert ist.
+    /// Startet den Boot-Timer. false, wenn die Kamera deaktiviert ist oder
+    /// kein nutzbarer Bus vorliegt. Der UART selbst wird von CameraBus geöffnet.
     bool init();
 
     /// Muss zyklisch aufgerufen werden: Boot-Delay, Handshake, Auto-Trigger.
@@ -180,14 +190,21 @@ public:
     /// Schaltet zwischen Video- und OSD-Menü-Modus um (Action CHANGE_MODE).
     bool changeMode();
 
+    /// Führt den Device-Info-Handshake sofort aus (blockierend, max.
+    /// RESPONSE_TIMEOUT_MS) und aktualisiert isDetected()/getFeatures().
+    /// Für Diagnose und den Hardware-Test.
+    bool probe();
+
     /// Sendet ein rohes Kamerakommando inkl. Header und CRC.
     bool sendCommand(uint8_t command, const uint8_t* payload, size_t payload_length);
     /// Kurzform für Cmd::CAMERA_CONTROL mit einer Action.
     bool sendControlAction(uint8_t action);
 
     uint8_t getCameraID() const { return camera_id_; }
-    /// true, sobald ein UART-Port konfiguriert ist (sagt nichts über die Kamera aus).
-    bool isPresent() const { return serial_ != nullptr; }
+    uint8_t getMuxChannel() const { return channel_; }
+    /// true, wenn die Kamera aktiviert ist und ein Bus vorliegt (sagt nichts
+    /// darüber aus, ob tatsächlich eine Kamera angeschlossen ist).
+    bool isPresent() const { return state_ != CameraState::UNCONFIGURED; }
     /// true, wenn die Kamera auf GET_DEVICE_INFO geantwortet hat (CRC geprüft).
     bool isDetected() const { return device_detected_; }
     /// Von der Firmware mitgeführter Aufnahmezustand (die Kamera meldet ihn nicht).
@@ -198,24 +215,22 @@ public:
     /// Feature-Bitmaske aus der GET_DEVICE_INFO-Antwort, 0 wenn unbekannt.
     uint16_t getFeatures() const { return features_; }
 
-private:
-    void pollDeviceInfo(uint32_t now_ms);
-    void requestDeviceInfo(uint32_t now_ms);
+    /// Sendet GET_DEVICE_INFO und wartet blockierend (max. RESPONSE_TIMEOUT_MS)
+    /// auf die Antwort - der Mux-Kanal liegt nur währenddessen an.
+    bool performHandshake();
 
     uint8_t camera_id_;
-    HardwareSerial* serial_;
-    uint32_t baudrate_;
+    uint8_t channel_;
+    CameraBus* bus_;
     RunCamModel model_;
     CameraTriggerMode mode_;
     uint32_t boot_delay_ms_;
+    bool enabled_;
 
     CameraState state_ = CameraState::UNCONFIGURED;
     uint32_t init_ms_ = 0;
     uint32_t last_probe_ms_ = 0;
     uint8_t probe_attempts_ = 0;
-
-    uint8_t rx_buffer_[RunCam::DEVICE_INFO_RESPONSE_LENGTH] = {};
-    size_t rx_count_ = 0;
 
     bool device_detected_ = false;
     uint8_t protocol_version_ = 0;

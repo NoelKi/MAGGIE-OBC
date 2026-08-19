@@ -1,9 +1,7 @@
 #include "statemachine/state_machine.hpp"
 #include <Arduino.h>
 
-namespace {
-
-const char* toString(MissionState s) {
+const char* StateMachine::toString(MissionState s) {
     switch (s) {
         case MissionState::PRE_LAUNCH: return "PRE_LAUNCH";
         case MissionState::ARMED:      return "ARMED";
@@ -11,11 +9,10 @@ const char* toString(MissionState s) {
         case MissionState::EXPERIMENT: return "EXPERIMENT";
         case MissionState::SAFE:       return "SAFE";
         case MissionState::ABORT:      return "ABORT";
+        case MissionState::TEST:       return "TEST";
     }
     return "UNKNOWN";
 }
-
-}  // namespace
 
 void StateMachine::init() {
     state_ = MissionState::PRE_LAUNCH;
@@ -39,13 +36,30 @@ void StateMachine::update(uint32_t now_ms, const StateMachineInputs& in) {
         case MissionState::ARMED:      handleArmed(in, now_ms); break;
         case MissionState::ASCENT:     handleAscent(in, now_ms); break;
         case MissionState::EXPERIMENT: handleExperiment(now_ms); break;
+        case MissionState::TEST:       handleTest(in, now_ms); break;
 
         // Endzustände - hier passiert nichts mehr.
-        // TODO ABORT: Aktoren stoppen, sobald Motor-/HDRM-Ansteuerung existiert.
         case MissionState::SAFE:
         case MissionState::ABORT:
             break;
     }
+}
+
+bool StateMachine::enterTest(uint32_t now_ms) {
+    // Nur vom Boden aus: sobald SODS gekommen ist, gilt die Flugsequenz.
+    if (state_ != MissionState::PRE_LAUNCH) {
+        Serial.printf("WARN  [StateMachine]: TEST_ENTER abgelehnt - Zustand ist %s.\n",
+                      toString(state_));
+        return false;
+    }
+    transitionTo(MissionState::TEST, now_ms);
+    return true;
+}
+
+bool StateMachine::exitTest(uint32_t now_ms) {
+    if (state_ != MissionState::TEST) return false;
+    transitionTo(MissionState::PRE_LAUNCH, now_ms);
+    return true;
 }
 
 bool StateMachine::checkAbort(const StateMachineInputs& in, uint32_t now_ms) {
@@ -92,9 +106,16 @@ void StateMachine::handleExperiment(uint32_t now_ms) {
     // TODO: Hier gehört die eigentliche Experimentsequenz hin - HDRM öffnen,
     // Arm ausfahren, Docking Target 1 + 2, Arm einfahren, HDRM schließen,
     // Netz auslösen. Erfordert Arm-Ansteuerung und Endschalter, die es im
-    // Projekt noch nicht gibt (siehe MotorHAL, aktuell nicht verdrahtet).
-    // Bis dahin nur der harte Zeit-Cutoff.
+    // Projekt noch nicht gibt. Bis dahin nur der harte Zeit-Cutoff.
     if (now_ms - t_soe_ms_ >= MissionConfig::T_EXPERIMENT_MS) {
         transitionTo(MissionState::SAFE, now_ms);
+    }
+}
+
+void StateMachine::handleTest(const StateMachineInputs& in, uint32_t now_ms) {
+    // Der Flug schlägt den Bodentest: kommt SODS, während noch getestet wird,
+    // geht es sofort in die reguläre Sequenz (System stoppt dabei die Aktoren).
+    if (in.sods) {
+        transitionTo(MissionState::ARMED, now_ms);
     }
 }

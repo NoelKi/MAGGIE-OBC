@@ -62,6 +62,18 @@ ARMED : Aktoren safe
 PRE_LAUNCH --> ARMED  : SODS = HIGH\n(T-600 s typ.)
 ARMED      --> ASCENT : LO = HIGH\n(T = 0 s)
 
+' ---------- Bodentest / Integration (nur am Boden erreichbar) ----------
+' Implementiert: statemachine/state_machine.hpp. Einziger Zustand, in dem
+' Aktor-Telecommands (Motor/HDRM) ausgefuehrt werden.
+state TEST <<pre>>
+TEST : S_T · Bodentest
+TEST : Aktoren per Telecommand frei,
+TEST : Telemetrie (IMU, Motor) laeuft
+
+PRE_LAUNCH --> TEST       : TC TEST_ENTER
+TEST       --> PRE_LAUNCH : TC TEST_EXIT
+TEST       --> ARMED      : SODS = HIGH\n(Flug schlaegt Bodentest)
+
 ' ============================================================
 '  Flight
 ' ============================================================

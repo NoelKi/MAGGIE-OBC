@@ -7,12 +7,19 @@
  * @file state_machine.hpp
  * @brief MAGGIE Missions-Zustandsmaschine (reduziertes Gerüst)
  *
- * Vollständiger Ablauf:
+ * Flugablauf:
  *   PRE_LAUNCH --SODS--> ARMED --LO--> ASCENT --SOE--> EXPERIMENT --Timer--> SAFE
  *   jederzeit --Abort--> ABORT
  *
- * TODO: In System integrieren (REXUSHAL instanziieren, Inputs befüllen).
- * TODO: Experimentsequenz in handleExperiment() füllen, sobald Arm/HDRM da sind.
+ * Bodentest (Review/Integration, siehe enterTest/exitTest):
+ *   PRE_LAUNCH --TC TEST_ENTER--> TEST --TC TEST_EXIT--> PRE_LAUNCH
+ *
+ * TEST ist der einzige Zustand, in dem Aktor-Telecommands (Motor/HDRM)
+ * ausgeführt werden - System::handleUplink() weist sie sonst ab. Kommt im
+ * TEST-Zustand ein echtes SODS-Signal, gewinnt der Flug: die Maschine geht
+ * nach ARMED und der Testbetrieb ist beendet.
+ *
+ * TODO: Experimentsequenz in handleExperiment() füllen, sobald der Arm da ist.
  */
 
 /// Sensordaten pro update()-Aufruf. System liest sie aus den HALs - die
@@ -26,7 +33,7 @@ struct StateMachineInputs {
     /// Last am Greifer. TODO: Quelle festlegen (Force Sensor 2 oder eigene Wegezelle).
     float force_load_n = 0.0f;
 
-    /// Manueller Abbruch. TODO: es gibt noch keinen Uplink-Kommando-Parser.
+    /// Manueller Abbruch per Telecommand (UplinkOpcode::ABORT).
     bool operator_abort = false;
 };
 
@@ -41,6 +48,25 @@ public:
     void update(uint32_t now_ms, const StateMachineInputs& in);
 
     MissionState getState() const { return state_; }
+
+    /// Klartextname des aktuellen Zustands (fürs Log).
+    static const char* toString(MissionState state);
+
+    /**
+     * @brief Bodentest-Modus betreten (Telecommand TEST_ENTER).
+     * Nur aus PRE_LAUNCH erlaubt - im Flug bleibt der Zustand unverändert.
+     * @return true, wenn der Wechsel stattgefunden hat
+     */
+    bool enterTest(uint32_t now_ms);
+
+    /**
+     * @brief Bodentest-Modus verlassen (Telecommand TEST_EXIT) -> PRE_LAUNCH.
+     * @return true, wenn der Wechsel stattgefunden hat
+     */
+    bool exitTest(uint32_t now_ms);
+
+    /// true, solange Aktor-Telecommands ausgeführt werden dürfen.
+    bool actuatorsUnlocked() const { return state_ == MissionState::TEST; }
 
     /// Zeit seit Liftoff in ms (0 solange LO noch nicht kam).
     uint32_t getMissionTimeMs(uint32_t now_ms) const {
@@ -60,4 +86,5 @@ private:
     void handleArmed(const StateMachineInputs& in, uint32_t now_ms);
     void handleAscent(const StateMachineInputs& in, uint32_t now_ms);
     void handleExperiment(uint32_t now_ms);
+    void handleTest(const StateMachineInputs& in, uint32_t now_ms);
 };

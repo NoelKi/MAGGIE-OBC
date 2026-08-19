@@ -6,18 +6,23 @@
  * @file mission_state.hpp
  * @brief MAGGIE REXUS State Machine - reduziertes Gerüst
  *
- * Bewusst auf die Hauptphasen reduziert. Alle Übergänge lassen sich allein
+ * Bewusst auf die Hauptphasen reduziert. Alle Flug-Übergänge lassen sich allein
  * aus den REXUS-Signalen (REXUSHAL) und millis() ableiten - es wird keine
  * Hardware vorausgesetzt, die es im Projekt noch nicht gibt.
+ *
+ * Die Zahlenwerte gehen als DATA[0] im SYS/STATE-Downlink über die Leitung
+ * (siehe telemetry_hal.hpp) und sind deshalb FEST - beim Erweitern nur hinten
+ * anhängen, nie umsortieren.
  */
 
 enum class MissionState : uint8_t {
-    PRE_LAUNCH,   // Idle, Selbsttests - wartet auf SODS
-    ARMED,        // SODS high: Datenaufzeichnung an, Aktoren safe - wartet auf LO
-    ASCENT,       // LO high (T=0): Flug - wartet auf SOE
-    EXPERIMENT,   // SOE high: Experimentfenster (HDRM, Arm, Docking)
-    SAFE,         // Experiment beendet: Aktoren aus, Telemetrie läuft weiter
-    ABORT,        // Fehlerfall: Aktoren stoppen
+    PRE_LAUNCH = 0,   // Idle, Selbsttests - wartet auf SODS
+    ARMED      = 1,   // SODS high: Datenaufzeichnung an, Aktoren safe - wartet auf LO
+    ASCENT     = 2,   // LO high (T=0): Flug - wartet auf SOE
+    EXPERIMENT = 3,   // SOE high: Experimentfenster (HDRM, Arm, Docking)
+    SAFE       = 4,   // Experiment beendet: Aktoren aus, Telemetrie läuft weiter
+    ABORT      = 5,   // Fehlerfall: Aktoren stoppen
+    TEST       = 6,   // Bodentest: Aktoren per Telecommand frei, Telemetrie an
 };
 
 namespace MissionConfig {

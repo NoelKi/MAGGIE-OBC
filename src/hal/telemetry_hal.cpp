@@ -8,7 +8,11 @@ TelemetryDownlink::TelemetryDownlink(HardwareSerial& serial)
 bool TelemetryDownlink::init(uint32_t baudrate) {
     // On the Teensy 4.1 Serial8 already maps to pins 34 (RX) / 35 (TX),
     // so no explicit pin assignment is needed.
-    serial_.begin(baudrate);
+    //
+    // RXINV dreht NUR die Empfangsleitung in Hardware um (LPUART-Register),
+    // die Sendeleitung bleibt unveraendert - genau das, was hier gebraucht
+    // wird. Begruendung siehe UPLINK_RX_INVERTED in telemetry_hal.hpp.
+    serial_.begin(baudrate, UPLINK_RX_INVERTED ? SERIAL_8N1_RXINV : SERIAL_8N1);
     initialized_ = true;
     return true;
 }
@@ -125,5 +129,58 @@ void TelemetryDownlink::sendMotor(int32_t position, int16_t speed, uint8_t state
 
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::MOTOR),
               static_cast<uint8_t>(DownlinkMotorMsg::STATE),
+              0, data, status1, status2);
+}
+
+void TelemetryDownlink::sendUplinkRaw(const uint8_t* bytes, uint8_t len) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    if (len > DOWNLINK_DATA_SIZE) len = DOWNLINK_DATA_SIZE;
+    for (uint8_t i = 0; i < len; i++) data[i] = bytes[i];
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::UPLINK_RAW),
+              0, data, 0, len);   // STATUS2 traegt die gueltige Laenge
+}
+
+void TelemetryDownlink::sendUplinkStats(uint32_t rx_bytes, uint16_t frames_ok,
+                                       uint16_t frames_bad, uint8_t last_opcode) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [rx_bytes(uint16 BE, gesaettigt) frames_ok(uint16 BE)
+    //        frames_bad(uint16 BE) last_opcode(uint8) 0]
+    const uint16_t rx16 = (rx_bytes > 0xFFFF) ? 0xFFFF : static_cast<uint16_t>(rx_bytes);
+    data[0] = static_cast<uint8_t>(rx16 >> 8);
+    data[1] = static_cast<uint8_t>(rx16 & 0xFF);
+    data[2] = static_cast<uint8_t>(frames_ok >> 8);
+    data[3] = static_cast<uint8_t>(frames_ok & 0xFF);
+    data[4] = static_cast<uint8_t>(frames_bad >> 8);
+    data[5] = static_cast<uint8_t>(frames_bad & 0xFF);
+    data[6] = last_opcode;
+    // data[7] reserved (0)
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::UPLINK),
+              0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendSystem(uint8_t mission_state, uint8_t subsystems,
+                                   uint32_t uptime_ms,
+                                   uint8_t status1, uint8_t status2,
+                                   uint8_t rexus) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [state(uint8) subsys(uint8) uptime_ms(uint32 BE) rexus(uint8) 0]
+    data[0] = mission_state;
+    data[1] = subsystems;
+    put_be32(&data[2], static_cast<int32_t>(uptime_ms));
+    data[6] = rexus;      // rohe REXUS-Pegel, siehe DL_REXUS_*
+    // data[7] reserved (0)
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::STATE),
               0, data, status1, status2);
 }

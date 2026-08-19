@@ -7,6 +7,8 @@
 #include "hal/telemetry_hal.hpp"
 #include "hal/motor_hal.hpp"
 #include "hal/uplink_hal.hpp"
+#include "hal/rexus_hal.hpp"
+#include "statemachine/state_machine.hpp"
 #include "camera_config.hpp"
 #include "pin_config.hpp"
 
@@ -45,14 +47,23 @@ private:
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
     TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial8, pins 34/35)
     MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871 + Encoder, Closed-Loop)
-    UplinkReceiver* uplink_ = nullptr;                 ///< Motor-Telecommand-Empfang (Serial8 RX)
+    UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial8 RX)
+    REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
     CameraBus* camera_bus_ = nullptr;                   ///< gemeinsamer UART + Mux für alle Kameras
     CameraHAL* cameras_[CAMERA_COUNT] = {};             ///< siehe camera_config.hpp für die Liste
     bool camera_reported_[CAMERA_COUNT] = {};           ///< Handshake-Ergebnis bereits geloggt?
 
+    // -----------------------------------------------------------------------
+    // Missions-Zustandsmaschine
+    // -----------------------------------------------------------------------
+    StateMachine state_machine_;                        ///< PRE_LAUNCH/TEST/Flugsequenz
+    MissionState last_state_ = MissionState::PRE_LAUNCH; ///< für die Zustandswechsel-Erkennung
+    bool abort_requested_ = false;                       ///< gelatchter Abbruch per Telecommand
+
     uint32_t last_weight_read_ms_ = 0;      ///< Zeitstempel des letzten Weight-Auslesens
     uint32_t last_force_read_ms_ = 0;       ///< Zeitstempel des letzten Force-Auslesens
     uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten Telemetrie-Downlinks
+    uint32_t last_sys_telemetry_ms_ = 0;    ///< Zeitstempel des letzten SYS/STATE-Downlinks
 
     // Kein Subsystem-Fehler ist fatal: der OBC laeuft degradiert weiter, statt
     // z.B. wegen eines fehlenden Wiegesensors Telemetrie und Kameras mit
@@ -63,13 +74,19 @@ private:
     bool imu_ready_ = false;                ///< IMU erfolgreich initialisiert
     bool downlink_ready_ = false;           ///< Downlink-UART bereit
     bool motor_ready_ = false;              ///< Motor (inkl. Encoder) initialisiert
+    bool rexus_ready_ = false;              ///< REXUS-Signalpins konfiguriert
 
     void printWelcomeBanner();
     void handleWeightReading();
     void handleForceReading();
     void handleTelemetry();
     void handleMotorTelemetry();
-    void handleUplink();
+    void handleSystemTelemetry(uint32_t now_ms);
+    void handleStateMachine(uint32_t now_ms);
+    void onStateChanged(MissionState previous, MissionState current);
+    void handleUplink(uint32_t now_ms);
+    bool handleMotorCommand(const UplinkCommand& cmd);
+    uint8_t subsystemBits() const;
     void handleCameras(uint32_t now_ms);
 };
 

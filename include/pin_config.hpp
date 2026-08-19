@@ -96,23 +96,66 @@ static constexpr uint8_t PIN_M3_A = 18;        ///< Motor 3 Channel A
 static constexpr uint8_t PIN_M3_B = 19;        ///< Motor 3 Channel B
 
 // Motor 1 (Channels A+B)
-static constexpr uint8_t PIN_M1_B = 14;        ///< Motor 1 Channel B
-static constexpr uint8_t PIN_M1_A = 15;        ///< Motor 1 Channel A
+static constexpr uint8_t PIN_M1_B = 40;        ///< Motor 1 Channel B
+static constexpr uint8_t PIN_M1_A = 41;        ///< Motor 1 Channel A
 // SCK
 static constexpr uint8_t PIN_SCK = 13;        ///< SCK
 
 // Motor 1 Quadratur-Encoder (A/B) - Closed-Loop Positionsregelung.
-// Freie, interrupt-fähige Teensy-4.1-Pins. NICHT 0/1 (ARM-UART) verwenden,
-// obwohl der Prototyp hardwareTest/motor.cpp dort verdrahtet war.
-static constexpr uint8_t PIN_M1_ENC_A = 16;    ///< Motor 1 Encoder Channel A
-static constexpr uint8_t PIN_M1_ENC_B = 17;    ///< Motor 1 Encoder Channel B
+// Verbaut: Pololu enc03d (0J12461) am Getriebemotor.
+//
+// Pin 0/1 sind in der Belegungstabelle die ARM-UART (Serial1). Der Roboterarm
+// wird in dieser Firmware nirgends instanziiert - es gibt kein Serial1.begin(),
+// nur die ungenutzten Aliase ARM_TX_PIN/ARM_RX_PIN in sensor_hal.hpp. Die Pins
+// sind damit reines GPIO und frei. Auf dem Teensy 4.1 ist jeder Digitalpin
+// interruptfähig, die Encoder-Bibliothek arbeitet hier also normal.
+//
+// ACHTUNG: Sobald die ARM-Kommunikation dazukommt, kollidiert sie hier - dann
+// muss der Encoder umziehen (frei waeren dann z.B. 18+20).
+static constexpr uint8_t PIN_M1_ENC_A = 0;     ///< Motor 1 Encoder Channel A
+static constexpr uint8_t PIN_M1_ENC_B = 1;     ///< Motor 1 Encoder Channel B
 
 // ===========================================================================
 // REXUS Signals
 // ===========================================================================
-static constexpr uint8_t PIN_L0_T = 40;        ///< L0_t Signal
+// L0_t lag urspruenglich auf Pin 40 - dort haengt jetzt PIN_M1_B. REXUSHAL::init()
+// laeuft in System::init() NACH dem Motor und wuerde den Pin mit INPUT_PULLDOWN
+// zurueckkonfigurieren, der Motorkanal waere damit tot. Deshalb auf Pin 21
+// ausgewichen: frei, und ohnehin ohne PWM-Timer - ein reiner Digitaleingang
+// verschwendet dort also keinen der knappen PWM-faehigen Pins.
+// TODO: vor dem Flug gegen docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt abgleichen.
+static constexpr uint8_t PIN_L0_T = 21;        ///< L0_t Signal
 static constexpr uint8_t PIN_SOE_I = 39;       ///< SOE_i Signal
 static constexpr uint8_t PIN_SODS_I = 38;      ///< SODS_i Signal
+
+/**
+ * @brief Pegel, bei dem ein REXUS-Signal als ausgeloest gilt.
+ *
+ * true  = aktiv HIGH (Signal liegt direkt am Pin an). REXUSHAL zieht die
+ *         Leitungen dann per INPUT_PULLDOWN auf LOW, damit eine offene
+ *         Leitung als "nicht ausgeloest" gilt.
+ * false = aktiv LOW. Fuer eine invertierende Eingangsstufe (Optokoppler oder
+ *         Pegelwandler mit Pull-up), deren Ausgang im Ruhezustand auf HIGH
+ *         liegt. REXUSHAL zieht die Leitungen dann per INPUT_PULLUP hoch,
+ *         damit auch hier eine offene Leitung "nicht ausgeloest" bedeutet.
+ *
+ * EINGESTELLT AUF AKTIV LOW - so sieht die Schnittstelle laut Schaltplan der
+ * Elektrotechniker aus (Open Drain):
+ *
+ *   Experiment-Seite:     Pull-up nach VCC, Abgriff zum Mikrocontroller
+ *   Service-Module-Seite: NMOS, Drain an der Leitung, Source an GND,
+ *                         Gate = "Input from Service Module"
+ *
+ *   Signal liegt an  -> Gate HIGH -> NMOS leitet -> Leitung auf GND = LOW
+ *   Signal ruht      -> NMOS sperrt -> Pull-up haelt die Leitung auf HIGH
+ *
+ * Deckt sich mit der Messung am Bodenaufbau: Pin 38 (SODS) und 39 (SOE) lagen
+ * dauerhaft HIGH (= Ruhe), waehrend der unbeschaltete Pin 21 LOW lieferte.
+ *
+ * ACHTUNG Hardware: Die Teensy-4.1-GPIOs sind NICHT 5-V-tolerant. Der Pull-up
+ * auf der Experiment-Seite muss nach 3,3 V gehen, nicht nach 5 V.
+ */
+static constexpr bool REXUS_ACTIVE_HIGH = false;
 
 // ===========================================================================
 // Sensors

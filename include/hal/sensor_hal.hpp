@@ -6,7 +6,6 @@
 // Include all HAL modules
 #include "hal/force_sensor_hal.hpp"
 #include "hal/motor_hal.hpp"
-#include "hal/led_hal.hpp"
 #include "hal/uart_hal.hpp"
 #include "hal/imu_hal.hpp"
 #include "hal/rexus_hal.hpp"
@@ -72,16 +71,6 @@ constexpr uint8_t MOTOR_2_A_PIN = PIN_M2_A;  // Pin 23
 constexpr uint8_t MOTOR_2_B_PIN = PIN_M2_B;  // Pin 22
 constexpr uint8_t MOTOR_3_A_PIN = PIN_M3_A;  // Pin 18
 constexpr uint8_t MOTOR_3_B_PIN = PIN_M3_B;  // Pin 19
-
-// ===========================================================================
-// LED Control (RGB) — TODO: assign actual R/G/B pins in pin_config.hpp
-// ===========================================================================
-constexpr uint8_t LED1_R_PIN = PIN_LED_PWM_1;   ///< TODO: R-Kanal LED 1
-constexpr uint8_t LED1_G_PIN = PIN_LED_PWM_1;   ///< TODO: G-Kanal LED 1
-constexpr uint8_t LED1_B_PIN = PIN_LED_PWM_1;   ///< TODO: B-Kanal LED 1
-constexpr uint8_t LED2_R_PIN = PIN_LED_PWM_2;   ///< TODO: R-Kanal LED 2
-constexpr uint8_t LED2_G_PIN = PIN_LED_PWM_2;   ///< TODO: G-Kanal LED 2
-constexpr uint8_t LED2_B_PIN = PIN_LED_PWM_2;   ///< TODO: B-Kanal LED 2
 
 // ===========================================================================
 // REXUS Signals

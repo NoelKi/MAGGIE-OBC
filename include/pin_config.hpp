@@ -30,12 +30,6 @@ static constexpr uint8_t PIN_FORCE_Y_1 = 3;   ///< Analog Input
 static constexpr uint8_t PIN_FORCE_Z_1 = 4;   ///< Analog Input
 
 // ===========================================================================
-// LED PWM Outputs
-// ===========================================================================
-static constexpr uint8_t PIN_LED_PWM_1 = 5;    ///< LED PWM 1
-static constexpr uint8_t PIN_LED_PWM_2 = 6;    ///< LED PWM 2
-
-// ===========================================================================
 // Cameras
 // ===========================================================================
 // 4x RunCam Split 4 (115200 8N1) an EINEM UART (Serial2). TX und RX werden

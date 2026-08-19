@@ -36,17 +36,7 @@
   - Individual motor instances
   - PWM frequency configuration
 
-#### 3. **LED HAL** (`led_hal.hpp/cpp`)
-- **Purpose**: Status LED control with PWM brightness
-- **LED Pins**:
-  - LED 1: Pin 5
-  - LED 2: Pin 6
-- **Features**:
-  - Brightness control (0-255)
-  - On/Off/Toggle functions
-  - Blinking support
-
-#### 4. **UART HAL** (`uart_hal.hpp/cpp`)
+#### 3. **UART HAL** (`uart_hal.hpp/cpp`)
 - **Purpose**: Serial communication interface
 - **ARM Communication**: Pins 0 (TX), 1 (RX)
 - **Features**:
@@ -54,7 +44,7 @@
   - Send/receive operations
   - Data availability check
 
-#### 5. **Camera HAL** (`camera_hal.hpp/cpp`)
+#### 4. **Camera HAL** (`camera_hal.hpp/cpp`)
 - **Purpose**: Camera module communication via UART
 - **Camera Pins**:
   - Camera 1: TX=7, RX=8 (UART2)
@@ -65,7 +55,7 @@
   - Command send/receive
   - Image capture interface
 
-#### 6. **IMU HAL** (`imu_hal.hpp/cpp`)
+#### 5. **IMU HAL** (`imu_hal.hpp/cpp`)
 - **Purpose**: Accelerometer and Gyroscope interface
 - **Communication**: SPI
 - **Chip Select Pins**:
@@ -78,7 +68,7 @@
   - Self-test capability
 - **Data Structure**: `IMUReading`
 
-#### 7. **REXUS HAL** (`rexus_hal.hpp/cpp`)
+#### 6. **REXUS HAL** (`rexus_hal.hpp/cpp`)
 - **Purpose**: REXUS experiment signal interface
 - **Signal Pins**:
   - L0_t (Launch): Pin 40
@@ -89,7 +79,7 @@
   - Experiment phase tracking
   - Descent detection
 
-#### 8. **Communication HAL** (`communication_hal.hpp/cpp`)
+#### 7. **Communication HAL** (`communication_hal.hpp/cpp`)
 - **Purpose**: Up/Down-link signal monitoring
 - **Signal Pins**:
   - Uplink Plus: Pin 34
@@ -126,8 +116,6 @@ class System {
     // MotorHAL* motor_1_;
     // MotorHAL* motor_2_;
     // MotorHAL* motor_3_;
-    // LEDHAL* led_1_;
-    // LEDHAL* led_2_;
     // IMUHAL* imu_;
     // REXUSHAL* rexus_;
     // CommunicationHAL* comm_;
@@ -154,8 +142,6 @@ class System {
 | Motor 2 B | 22 | Motor 2 Channel B | MotorHAL |
 | Motor 3 A | 18 | Motor 3 Channel A | MotorHAL |
 | Motor 3 B | 19 | Motor 3 Channel B | MotorHAL |
-| LED 1 | 5 | Status LED 1 | LEDHAL |
-| LED 2 | 6 | Status LED 2 | LEDHAL |
 | Camera 1 TX | 7 | Camera 1 TX | CameraHAL |
 | Camera 1 RX | 8 | Camera 1 RX | CameraHAL |
 | Force CLK 2 | 9 | Force Sensor Control | (Reserved) |
@@ -198,7 +184,6 @@ while (true) {
 - Advanced SPI communication
 - Real hardware UART implementation for cameras
 - Motor speed feedback (encoder support)
-- LED patterns and animations
 - Event-based architecture for REXUS signals
 
 ---

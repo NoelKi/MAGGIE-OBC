@@ -25,13 +25,14 @@ public:
     static constexpr long COUNTS_PER_REV = 4600;                ///< Counts pro voller Umdrehung
     static constexpr long HALF_TURN      = COUNTS_PER_REV / 2;  ///< 180° ≈ 2300 Counts
 
-    // HDRM (Hold-Down & Release Mechanism): der Mechanismus wird durch eine
-    // halbe Umdrehung geöffnet. Referenz ist die Encoder-Nullposition, die
-    // beim Start bzw. per zeroPosition() gesetzt wird -> die Fahrten sind
-    // ABSOLUT, mehrfaches Öffnen dreht den Motor also nicht weiter.
-    static constexpr long HDRM_CLOSED_COUNTS = 0;               ///< Nullposition = verriegelt
-    static constexpr long HDRM_OPEN_COUNTS   = HALF_TURN;       ///< 180° = freigegeben
-    static constexpr long HDRM_TOL_COUNTS    = 60;              ///< Fenster für die Zustandsmeldung
+    // Referenzpositionen fuer die Zustandsmeldung an die Bodenstation. Bezug
+    // ist die Encoder-Nullposition, die beim Start bzw. per zeroPosition()
+    // gesetzt wird. Die Fahrten selbst (halfTurnForward/-Reverse) sind RELATIV,
+    // diese Fenster sagen nur, ob der Motor gerade am Nullpunkt oder eine halbe
+    // Umdrehung davon entfernt steht (HDRM zu bzw. offen).
+    static constexpr long ZERO_COUNTS      = 0;                 ///< Nullposition (HDRM verriegelt)
+    static constexpr long HALF_TURN_COUNTS = HALF_TURN;         ///< 180° (HDRM freigegeben)
+    static constexpr long POS_WINDOW_COUNTS = 60;               ///< Fenster für die Zustandsmeldung
 
     /**
      * @brief Constructor for Motor HAL
@@ -109,14 +110,11 @@ public:
     /** @brief Startet eine geregelte Fahrt auf die absolute Zielposition. */
     void moveTo(long target);
 
-    /** @brief Dreht eine halbe Umdrehung (+HALF_TURN) ab der aktuellen Position. */
-    void halfTurn();
+    /** @brief Dreht eine halbe Umdrehung vorwaerts (+180°) ab der aktuellen Position. */
+    void halfTurnForward();
 
-    /** @brief Fährt den HDRM auf die absolute Offen-Position (+180°). */
-    void hdrmOpen() { moveTo(HDRM_OPEN_COUNTS); }
-
-    /** @brief Fährt den HDRM auf die absolute Geschlossen-Position (Nullpunkt). */
-    void hdrmClose() { moveTo(HDRM_CLOSED_COUNTS); }
+    /** @brief Dreht eine halbe Umdrehung rueckwaerts (-180°) ab der aktuellen Position. */
+    void halfTurnReverse();
 
     /**
      * @brief Setzt die aktuelle Position als Nullpunkt ("HDRM geschlossen").
@@ -124,11 +122,11 @@ public:
      */
     void zeroPosition();
 
-    /** @brief true, wenn die Position im Fenster um die Offen-Position liegt. */
-    bool isHdrmOpen();
-
     /** @brief true, wenn die Position im Fenster um den Nullpunkt liegt. */
-    bool isHdrmClosed();
+    bool isAtZero();
+
+    /** @brief true, wenn die Position im Fenster um +180° liegt. */
+    bool isAtHalfTurn();
 
     /** @brief Motor dauerhaft mit Default-Geschwindigkeit einschalten. */
     void on();

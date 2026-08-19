@@ -43,14 +43,14 @@ static constexpr uint8_t UPLINK_FRAME_SIZE = 6;
 enum class UplinkOpcode : uint8_t {
     MOTOR_OFF       = 0x00,   ///< Motor ausschalten (bricht Fahrt ab)
     MOTOR_ON        = 0x01,   ///< Motor dauerhaft einschalten (offene Steuerung)
-    MOTOR_HALF_TURN = 0x02,   ///< relative halbe Umdrehung ab aktueller Position
-    HDRM_OPEN       = 0x03,   ///< HDRM öffnen: absolut auf +180° fahren
-    HDRM_CLOSE      = 0x04,   ///< HDRM schließen: absolut auf die Nullposition
-    MOTOR_ZERO      = 0x05,   ///< aktuelle Position als "HDRM geschlossen" setzen
+    MOTOR_HALF_TURN = 0x02,   ///< Altbestand: identisch zu HALF_TURN_FWD
+    HALF_TURN_FWD   = 0x03,   ///< halbe Umdrehung vorwaerts (relativ +180°)
+    HALF_TURN_REV   = 0x04,   ///< halbe Umdrehung rueckwaerts (relativ -180°)
+    MOTOR_ZERO      = 0x05,   ///< aktuelle Position als Nullpunkt setzen
 
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH
-    ABORT           = 0x1F,   ///< Missionsabbruch: Aktoren stoppen -> ABORT
+    ABORT           = 0x1F,   ///< Abbruch: Aktoren stoppen -> ABORT
 };
 
 struct UplinkCommand {

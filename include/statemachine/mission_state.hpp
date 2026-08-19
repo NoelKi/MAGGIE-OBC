@@ -4,32 +4,26 @@
 
 /**
  * @file mission_state.hpp
- * @brief MAGGIE REXUS State Machine - reduziertes Gerüst
+ * @brief MAGGIE Betriebszustände - schlanker Testaufbau
  *
- * Bewusst auf die Hauptphasen reduziert. Alle Flug-Übergänge lassen sich allein
- * aus den REXUS-Signalen (REXUSHAL) und millis() ableiten - es wird keine
- * Hardware vorausgesetzt, die es im Projekt noch nicht gibt.
+ * Bewusst auf das reduziert, was mit der aktuell verbauten Hardware (IMU,
+ * HDRM-Motor mit Encoder, Up-/Downlink, REXUS-Signale) auch wirklich
+ * durchfahren werden kann:
+ *
+ *   PRE_LAUNCH  Grundzustand nach dem Reset, Telemetrie laeuft, Aktoren gesperrt
+ *   TEST        Bodentest, Motor-Telecommands freigegeben
+ *   ABORT       Endzustand, Aktoren aus - nur ein Reset fuehrt heraus
  *
  * Die Zahlenwerte gehen als DATA[0] im SYS/STATE-Downlink über die Leitung
- * (siehe telemetry_hal.hpp) und sind deshalb FEST - beim Erweitern nur hinten
- * anhängen, nie umsortieren.
+ * (siehe telemetry_hal.hpp) und sind deshalb FEST. Die Lücke 1..4 stammt aus
+ * der frueheren Flugsequenz (ARMED/ASCENT/EXPERIMENT/SAFE) und bleibt
+ * reserviert: kommen diese Zustände zurück, behalten sie ihre alten Werte und
+ * die Bodenstation muss nicht umgelernt werden.
  */
 
 enum class MissionState : uint8_t {
-    PRE_LAUNCH = 0,   // Idle, Selbsttests - wartet auf SODS
-    ARMED      = 1,   // SODS high: Datenaufzeichnung an, Aktoren safe - wartet auf LO
-    ASCENT     = 2,   // LO high (T=0): Flug - wartet auf SOE
-    EXPERIMENT = 3,   // SOE high: Experimentfenster (HDRM, Arm, Docking)
-    SAFE       = 4,   // Experiment beendet: Aktoren aus, Telemetrie läuft weiter
-    ABORT      = 5,   // Fehlerfall: Aktoren stoppen
+    PRE_LAUNCH = 0,   // Idle: Telemetrie an, Aktoren gesperrt
+    // 1..4 reserviert (ARMED / ASCENT / EXPERIMENT / SAFE der Flugsequenz)
+    ABORT      = 5,   // Fehlerfall: Aktoren stoppen, Endzustand
     TEST       = 6,   // Bodentest: Aktoren per Telecommand frei, Telemetrie an
 };
-
-namespace MissionConfig {
-    /// Dauer des Experimentfensters ab SOE. Aus dem Diagramm: T_HARD_CUT = t_µg + 100 s.
-    static constexpr uint32_t T_EXPERIMENT_MS = 100000;
-
-    /// Force-Limit -> ABORT. Wird NUR im EXPERIMENT geprüft: In ASCENT
-    /// würden die Boost-Lasten (mehrere g) das Limit sofort reißen.
-    static constexpr float F_MAX_N = 5.0f;
-}

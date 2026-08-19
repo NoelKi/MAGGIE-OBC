@@ -155,9 +155,14 @@ void MotorHAL::moveTo(long target) {
     move_failed_   = false;
 }
 
-void MotorHAL::halfTurn() {
+void MotorHAL::halfTurnForward() {
     if (!enc_) return;
     moveTo(getPosition() + HALF_TURN);
+}
+
+void MotorHAL::halfTurnReverse() {
+    if (!enc_) return;
+    moveTo(getPosition() - HALF_TURN);
 }
 
 void MotorHAL::zeroPosition() {
@@ -167,12 +172,12 @@ void MotorHAL::zeroPosition() {
     if (enc_) enc_->write(0);
 }
 
-bool MotorHAL::isHdrmOpen() {
-    return enc_ && labs(getPosition() - HDRM_OPEN_COUNTS) <= HDRM_TOL_COUNTS;
+bool MotorHAL::isAtHalfTurn() {
+    return enc_ && labs(getPosition() - HALF_TURN_COUNTS) <= POS_WINDOW_COUNTS;
 }
 
-bool MotorHAL::isHdrmClosed() {
-    return enc_ && labs(getPosition() - HDRM_CLOSED_COUNTS) <= HDRM_TOL_COUNTS;
+bool MotorHAL::isAtZero() {
+    return enc_ && labs(getPosition() - ZERO_COUNTS) <= POS_WINDOW_COUNTS;
 }
 
 void MotorHAL::on() {

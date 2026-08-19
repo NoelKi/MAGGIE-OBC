@@ -4,13 +4,10 @@
 #include <usb_serial.h>
 
 // ===========================================================================
-// Sensor Read Intervals (in milliseconds)
+// Intervalle (in Millisekunden)
 // ===========================================================================
-#define WEIGHT_READ_INTERVAL_MS 500     ///< Read weight every 500ms
-#define FORCE_READ_INTERVAL_MS 100      ///< Read force every 100ms
-#define TELEMETRY_INTERVAL_MS 50        ///< Send IMU downlink every 50ms (20 Hz)
+#define TELEMETRY_INTERVAL_MS 50        ///< Send IMU/Motor downlink every 50ms (20 Hz)
 #define SYS_TELEMETRY_INTERVAL_MS 1000  ///< Send SYS/STATE downlink every 1s (1 Hz)
-#define WEIGHT_CALIBRATION_FACTOR 1.0f  ///< Calibration factor for HX711
 #define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial8, pins 34/35)
 
 System::System() {
@@ -18,59 +15,17 @@ System::System() {
 }
 
 System::~System() {
-    delete weight_sensor_;
-    delete force_sensor_2_;
     delete imu_;
     delete downlink_;
     delete motor_;
     delete uplink_;
     delete rexus_;
-    for (auto* camera : cameras_) {
-        delete camera;
-    }
-    delete camera_bus_;  // nach den Kameras, sie halten einen Zeiger darauf
 }
 
 bool System::init() {
     startup_time = millis();
 
     printWelcomeBanner();
-
-    // -----------------------------------------------------------------------
-    // Gewichtssensor (HX711, ein Sensor an Pin 2/3)
-    // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Gewichtssensor (HX711)...");
-    weight_sensor_ = new WeightSensorDriver(
-        PIN_HX711_DOUT, PIN_HX711_SCK,
-        PIN_HX711_DOUT, PIN_HX711_SCK   // zweiter Kanal zeigt auf denselben Chip – wird nicht verwendet
-    );
-
-    weight_sensor_ready_ = weight_sensor_->init(ScaleType::HX711);
-    if (weight_sensor_ready_) {
-        // Kalibrierung und Tare
-        weight_sensor_->setCalibrationFactor(1, WEIGHT_CALIBRATION_FACTOR);
-        weight_sensor_->tareScale1();
-        Serial.println("INFO  [System]: Gewichtssensor bereit.");
-    } else {
-        Serial.println("WARN  [System]: Gewichtssensor nicht initialisiert - weiter ohne Gewichtsmessung.");
-    }
-
-    // -----------------------------------------------------------------------
-    // Kraftsensor 2 (Custom Analog Sensor)
-    // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (Analog)...");
-    force_sensor_2_ = new ForceSensorHAL(
-        FORCE_SENSOR_2_X_PIN,
-        FORCE_SENSOR_2_Y_PIN,
-        FORCE_SENSOR_2_Z_PIN
-    );
-
-    force_sensor_ready_ = force_sensor_2_->init();
-    if (force_sensor_ready_) {
-        Serial.println("INFO  [System]: Kraftsensor 2 bereit.");
-    } else {
-        Serial.println("WARN  [System]: Kraftsensor 2 nicht initialisiert - weiter ohne Kraftmessung.");
-    }
 
     // -----------------------------------------------------------------------
     // IMU (BMI088 ueber SPI) - fuer Telemetrie-Downlink
@@ -119,9 +74,9 @@ bool System::init() {
     uplink_ = new UplinkReceiver(Serial8);
 
     // -----------------------------------------------------------------------
-    // REXUS-Signale (L0 / SOE / SODS) + Missions-Zustandsmaschine
-    // Am Bodenaufbau liegen die Leitungen offen -> Pulldowns in REXUSHAL::init()
-    // halten sie definiert LOW, sonst würde Rauschen die Sequenz auslösen.
+    // REXUS-Signale (L0 / SOE / SODS). Sie loesen in diesem Ausbau KEINE
+    // Zustandswechsel aus - die Rohpegel gehen nur mit dem SYS/STATE-Frame an
+    // die Bodenstation, damit die Verkabelung am Aufbau geprueft werden kann.
     // -----------------------------------------------------------------------
     Serial.printf("INFO  [System]: Initialisiere REXUS-Signale (L0 %u / SOE %u / SODS %u)...\n",
                   PIN_L0_T, PIN_SOE_I, PIN_SODS_I);
@@ -135,45 +90,18 @@ bool System::init() {
                   StateMachine::toString(last_state_));
 
     // -----------------------------------------------------------------------
-    // Kameras (Anzahl/Intervall siehe camera_config.hpp)
-    // Fehler hier sind NICHT fatal: einzelne Kameras können fehlen/ungeklärt sein.
-    // -----------------------------------------------------------------------
-    Serial.printf("INFO  [System]: Initialisiere Kamera-Bus (Mux-Select Pin %u/%u)...\n",
-                  PIN_CAM_MUX_A, PIN_CAM_MUX_B);
-    camera_bus_ = new CameraBus(CAMERA_BUS_UART, PIN_CAM_MUX_A, PIN_CAM_MUX_B);
-    if (!camera_bus_->begin(RunCam::BAUDRATE)) {
-        Serial.println("WARN  [System]: Kamera-Bus nicht verfügbar - alle Kameras übersprungen.");
-    }
-
-    Serial.printf("INFO  [System]: Initialisiere %u Kamera(s)...\n", (unsigned)CAMERA_COUNT);
-    for (size_t i = 0; i < CAMERA_COUNT; ++i) {
-        cameras_[i] = new CameraHAL(CAMERA_CONFIGS[i], camera_bus_);
-        if (cameras_[i]->init()) {
-            // Bus ist offen. Die Kameras brauchen nach dem Einschalten noch
-            // einige Sekunden - der Handshake läuft in handleCameras().
-            Serial.printf("INFO  [System]: Kamera %u auf Mux-Kanal %u, warte auf Boot...\n",
-                          cameras_[i]->getCameraID(), cameras_[i]->getMuxChannel());
-        } else {
-            Serial.printf("WARN  [System]: Kamera %u deaktiviert oder kein Bus - übersprungen.\n",
-                          cameras_[i]->getCameraID());
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Zusammenfassung. Der OBC startet auch dann, wenn einzelne Subsysteme
     // fehlen - system_healthy meldet den Zustand nur an die Bodenstation.
     // -----------------------------------------------------------------------
-    system_healthy = weight_sensor_ready_ && force_sensor_ready_ &&
-                     imu_ready_ && downlink_ready_;
+    system_healthy = imu_ready_ && downlink_ready_ && motor_ready_;
 
     if (system_healthy) {
         Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
     } else {
-        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - Gewicht:%s Kraft:%s IMU:%s Downlink:%s\n\n",
-                      weight_sensor_ready_ ? "OK" : "FEHLT",
-                      force_sensor_ready_  ? "OK" : "FEHLT",
-                      imu_ready_           ? "OK" : "FEHLT",
-                      downlink_ready_      ? "OK" : "FEHLT");
+        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - IMU:%s Downlink:%s Motor:%s\n\n",
+                      imu_ready_      ? "OK" : "FEHLT",
+                      downlink_ready_ ? "OK" : "FEHLT",
+                      motor_ready_    ? "OK" : "FEHLT");
     }
     return true;
 }
@@ -184,23 +112,11 @@ void System::run() {
     // Eingehende Telecommands verarbeiten (jeden Loop, geringe Latenz)
     handleUplink(now);
 
-    // Missionszustand fortschreiben (REXUS-Signale + Telecommands)
+    // Zustand fortschreiben (Telecommands)
     handleStateMachine(now);
 
     // Closed-Loop-Positionsregelung des Motors einen Schritt weiterführen
     if (motor_) motor_->update();
-
-    // Gewicht periodisch auslesen und ausgeben
-    if (now - last_weight_read_ms_ >= WEIGHT_READ_INTERVAL_MS) {
-        last_weight_read_ms_ = now;
-        handleWeightReading();
-    }
-
-    // Kraftsensor periodisch auslesen und ausgeben
-    if (now - last_force_read_ms_ >= FORCE_READ_INTERVAL_MS) {
-        last_force_read_ms_ = now;
-        handleForceReading();
-    }
 
     // Telemetrie-Downlink periodisch senden (IMU + Motor)
     if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
@@ -213,34 +129,6 @@ void System::run() {
     if (now - last_sys_telemetry_ms_ >= SYS_TELEMETRY_INTERVAL_MS) {
         last_sys_telemetry_ms_ = now;
         handleSystemTelemetry(now);
-    }
-
-    // Kameras: jede Kamera entscheidet anhand ihres CameraTriggerMode selbst,
-    // ob gerade ein Kommando fällig ist (siehe camera_config.hpp).
-    handleCameras(now);
-}
-
-void System::handleCameras(uint32_t now_ms) {
-    for (size_t i = 0; i < CAMERA_COUNT; ++i) {
-        CameraHAL* camera = cameras_[i];
-        if (!camera) continue;
-
-        camera->update(now_ms);
-
-        // Ergebnis des Handshakes genau einmal melden.
-        if (camera_reported_[i] || camera->getState() != CameraState::READY) continue;
-        camera_reported_[i] = true;
-
-        if (camera->isDetected()) {
-            Serial.printf("INFO  [System]: Kamera %u (Kanal %u) erkannt - RunCam-Protokoll v%u, Features 0x%04X.\n",
-                          camera->getCameraID(), camera->getMuxChannel(),
-                          camera->getProtocolVersion(), camera->getFeatures());
-        } else {
-            // TX zur Kamera kann trotzdem funktionieren, deshalb kein Abbruch -
-            // Kommandos werden ab jetzt ohne Bestätigung gesendet.
-            Serial.printf("WARN  [System]: Kamera %u (Kanal %u) antwortet nicht (RX-Leitung/Mux prüfen) - sende blind weiter.\n",
-                          camera->getCameraID(), camera->getMuxChannel());
-        }
     }
 }
 
@@ -268,10 +156,10 @@ void System::handleMotorTelemetry() {
     if (motor_->isMoving()) state |= DL_MOTOR_STATE_MOVING;
     else                    state |= DL_MOTOR_STATE_AT_TARGET;
 
-    // HDRM-Stellung aus der Encoder-Position ableiten, damit die Bodenstation
-    // sie nicht selbst aus den Counts rekonstruieren muss.
-    if (motor_->isHdrmOpen())   state |= DL_MOTOR_STATE_HDRM_OPEN;
-    if (motor_->isHdrmClosed()) state |= DL_MOTOR_STATE_HDRM_CLOSED;
+    // Stellung aus der Encoder-Position ableiten, damit die Bodenstation sie
+    // nicht selbst aus den Counts rekonstruieren muss.
+    if (motor_->isAtHalfTurn()) state |= DL_MOTOR_STATE_HDRM_OPEN;
+    if (motor_->isAtZero())     state |= DL_MOTOR_STATE_HDRM_CLOSED;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -281,11 +169,9 @@ void System::handleMotorTelemetry() {
 
 uint8_t System::subsystemBits() const {
     uint8_t bits = 0;
-    if (imu_ready_)           bits |= DL_SUBSYS_IMU;
-    if (motor_ready_)         bits |= DL_SUBSYS_MOTOR;
-    if (downlink_ready_)      bits |= DL_SUBSYS_DOWNLINK;
-    if (weight_sensor_ready_) bits |= DL_SUBSYS_WEIGHT;
-    if (force_sensor_ready_)  bits |= DL_SUBSYS_FORCE;
+    if (imu_ready_)      bits |= DL_SUBSYS_IMU;
+    if (motor_ready_)    bits |= DL_SUBSYS_MOTOR;
+    if (downlink_ready_) bits |= DL_SUBSYS_DOWNLINK;
     return bits;
 }
 
@@ -316,16 +202,14 @@ void System::handleSystemTelemetry(uint32_t now_ms) {
 // ---------------------------------------------------------------------------
 
 void System::handleStateMachine(uint32_t now_ms) {
-    StateMachineInputs in;
-
+    // REXUS weiterhin sampeln und entprellen - die Rohpegel gehen mit dem
+    // SYS/STATE-Frame nach unten, auch wenn sie nichts mehr auslösen.
     if (rexus_ready_ && rexus_) {
-        rexus_->update(now_ms);          // sampeln + entprellen, dann erst lesen
-        rexus_->getAllSignals(in.l0, in.soe, in.sods);
+        rexus_->update(now_ms);
     }
-    in.operator_abort = abort_requested_;
 
-    // TODO: force_load_n aus der Wegezelle des Greifers speisen, sobald sie
-    // verbaut ist - Kraftsensor 2 misst an anderer Stelle.
+    StateMachineInputs in;
+    in.operator_abort = abort_requested_;
 
     state_machine_.update(now_ms, in);
 
@@ -340,7 +224,7 @@ void System::onStateChanged(MissionState previous, MissionState current) {
     (void)previous;
 
     // Aktoren stillsetzen, sobald der Freigabezustand (TEST) verlassen wird -
-    // insbesondere wenn SODS den Bodentest abbricht oder ein ABORT kommt.
+    // insbesondere bei TEST_EXIT und bei einem ABORT.
     if (!state_machine_.actuatorsUnlocked() && motor_ && motor_ready_) {
         motor_->off();
         Serial.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
@@ -418,54 +302,22 @@ bool System::handleMotorCommand(const UplinkCommand& cmd) {
             Serial.println("INFO  [System]: TC MOTOR_OFF");
             motor_->off();
             return true;
-        case UplinkOpcode::MOTOR_HALF_TURN:
-            Serial.println("INFO  [System]: TC MOTOR_HALF_TURN (relativ +180 Grad)");
-            motor_->halfTurn();
+        case UplinkOpcode::MOTOR_HALF_TURN:   // Altbestand, gleiche Fahrt wie 0x03
+        case UplinkOpcode::HALF_TURN_FWD:
+            Serial.println("INFO  [System]: TC HALF_TURN_FWD (relativ +180 Grad)");
+            motor_->halfTurnForward();
             return true;
-        case UplinkOpcode::HDRM_OPEN:
-            Serial.println("INFO  [System]: TC HDRM_OPEN (absolut +180 Grad)");
-            motor_->hdrmOpen();
-            return true;
-        case UplinkOpcode::HDRM_CLOSE:
-            Serial.println("INFO  [System]: TC HDRM_CLOSE (absolut Nullposition)");
-            motor_->hdrmClose();
+        case UplinkOpcode::HALF_TURN_REV:
+            Serial.println("INFO  [System]: TC HALF_TURN_REV (relativ -180 Grad)");
+            motor_->halfTurnReverse();
             return true;
         case UplinkOpcode::MOTOR_ZERO:
-            Serial.println("INFO  [System]: TC MOTOR_ZERO - aktuelle Position = HDRM geschlossen");
+            Serial.println("INFO  [System]: TC MOTOR_ZERO - aktuelle Position = Nullpunkt");
             motor_->zeroPosition();
             return true;
         default:
             return false;
     }
-}
-
-void System::handleWeightReading() {
-    if (!weight_sensor_ready_ || !weight_sensor_) return;
-
-    ScaleReading r;
-    if (weight_sensor_->readScale1(r)) {
-        Serial.printf("[WEIGHT] Gewicht: %8.2f g  |  raw (tare-bereinigt): %ld\n",
-                      r.weight, static_cast<long>(r.raw_value));
-    } else {
-        Serial.println("[WEIGHT] Lesefehler – Sensor nicht bereit!");
-    }
-    Serial.println("---");
-}
-
-void System::handleForceReading() {
-    if (!force_sensor_ready_ || !force_sensor_2_) return;
-
-    ForceSensorReading reading;
-    if (force_sensor_2_->read(reading)) {
-        Serial.printf("[FORCE]  X: %8.2f  |  Y: %8.2f  |  Z: %8.2f  |  raw(X/Y/Z): %ld/%ld/%ld\n",
-                      reading.force_x, reading.force_y, reading.force_z,
-                      static_cast<long>(reading.raw_x),
-                      static_cast<long>(reading.raw_y),
-                      static_cast<long>(reading.raw_z));
-    } else {
-        Serial.println("[FORCE] Lesefehler – Sensor nicht bereit!");
-    }
-    Serial.println("---");
 }
 
 void System::printWelcomeBanner() {

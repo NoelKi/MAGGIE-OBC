@@ -10,105 +10,40 @@ using std::uint32_t;
  *
  * Define all hardware pins in one place - so only this file needs to be
  * changed during rewiring.
- * 
+ *
+ * Enthaelt nur noch die Pins der tatsaechlich verbauten Komponenten. Kommen
+ * weitere Sensoren dazu, gehoeren ihre Pins hier ergaenzt - die vollstaendige
+ * Belegung des Boards steht in docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt.
+ *
  * Source: Teensy 4.1 Pinout Diagram (MAGGIE OBC v1.6)
  */
 
 // ===========================================================================
-// UART / Serial Communication
+// SPI Bus (IMU)
 // ===========================================================================
-// ARM Communication (UART1)
-static constexpr uint8_t PIN_ARM_TX = 0;       ///< UART1 TX
-static constexpr uint8_t PIN_ARM_RX = 1;       ///< UART1 RX
+static constexpr uint8_t PIN_SPI1_MOSI = 11;   ///< MOSI
+static constexpr uint8_t PIN_SPI1_MISO = 12;   ///< MISO
+static constexpr uint8_t PIN_SCK = 13;         ///< SCK
+
+// Chip Select Pins des BMI088 (getrennte Dies fuer Accel und Gyro)
+static constexpr uint8_t PIN_CS_ACCEL = 37;    ///< Chip Select Accelerometer
+static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope
 
 // ===========================================================================
-// Force Sensors 1
+// Motor 1 - HDRM-Antrieb (DRV8871)
 // ===========================================================================
-// Sensor 1 (Force X, Y, Z) - Analog Input
-static constexpr uint8_t PIN_FORCE_X_1 = 2;   ///< Analog Input
-static constexpr uint8_t PIN_FORCE_Y_1 = 3;   ///< Analog Input
-static constexpr uint8_t PIN_FORCE_Z_1 = 4;   ///< Analog Input
-
-// ===========================================================================
-// Cameras
-// ===========================================================================
-// 4x RunCam Split 4 (115200 8N1) an EINEM UART (Serial2). TX und RX werden
-// gemeinsam über einen 4:1-Mux auf die jeweilige Kamera geschaltet.
-// Signalnamen aus Sicht der KAMERA: CAM..._TX = Ausgang der Kamera.
-static constexpr uint8_t PIN_CAM1_TX = 7;      ///< Teensy RX2  <- Mux <- Kamera TX
-static constexpr uint8_t PIN_CAM_MAIN_RX = 8;  ///< Teensy TX2  -> Mux -> Kamera RX
-
-// Kanalwahl des Mux: Kanal = (CAMDIR2 << 1) | CAMDIR1, also 0..3 = Kamera 1..4.
-//
-// ACHTUNG - Doppelbelegung: Pin 19 und 22 sind in diesem Header zusätzlich als
-// PIN_M3_B bzw. PIN_M2_B vergeben. Motor 2 und 3 werden aktuell nirgends
-// instanziiert, der Konflikt ist also noch theoretisch. Beim Finalisieren der
-// Pinbelegung auflösen. Werte stammen aus
-// docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt (CAMDIR1 = 19, CAMDIR2 = 22).
-static constexpr uint8_t PIN_CAM_MUX_A = 19;   ///< CAMDIR1, LSB der Kanalwahl
-static constexpr uint8_t PIN_CAM_MUX_B = 22;   ///< CAMDIR2, MSB der Kanalwahl
-
-// ===========================================================================
-// Force CLK 2
-// ===========================================================================
-static constexpr uint8_t PIN_FORCE_CLK_2 = 9;   ///< Analog Input
-static constexpr uint8_t PIN_CHIP_SELECT_FORCE = 10;   ///< Chip Select (Digital OUT)
-
-// ===========================================================================
-// SPI Bus
-// ===========================================================================
-// Standard Teensy 4.1 SPI1 Pins
-static constexpr uint8_t PIN_SPI1_MOSI = 11;    ///< MOSI
-static constexpr uint8_t PIN_SPI1_MISO = 12;    ///< MISO
-
-// ===========================================================================
-// Cameras
-// ===========================================================================
-// Zweiter Kamera-UART (Serial6). Seit dem Mux-Aufbau nicht mehr belegt - alle
-// vier Kameras hängen an Serial2. Konstanten bleiben als Reserve stehen.
-static constexpr uint8_t PIN_CAM_BACKUP_RX = 24;  ///< Teensy TX6, ungenutzt
-static constexpr uint8_t PIN_CAM3_TX = 25;        ///< Teensy RX6, ungenutzt
-
-static constexpr uint8_t PIN_CS_TEMP = 26;
-
-// ===========================================================================
-// Force CLK 1
-// ===========================================================================
-static constexpr uint8_t PIN_FORCE_CLK_1 = 27;   ///< Analog Input
-
-// ===========================================================================
-// Force Sensors 2
-// ===========================================================================
-// Sensor 2 (Force X, Y, Z) - Analog Input
-static constexpr uint8_t PIN_FORCE_X_2 = 30;   ///< Analog Input
-static constexpr uint8_t PIN_FORCE_Y_2 = 31;   ///< Analog Input
-static constexpr uint8_t PIN_FORCE_Z_2 = 32;   ///< Analog Input
-
-// ===========================================================================
-// Motor PWM Outputs (DRV8871 Driver)
-// ===========================================================================
-// Motor 2 (Channels A+B)
-static constexpr uint8_t PIN_M2_B = 22;        ///< Motor 2 Channel B
-static constexpr uint8_t PIN_M2_A = 23;        ///< Motor 2 Channel A
-
-// Motor 3 (Channels A+B)
-static constexpr uint8_t PIN_M3_A = 18;        ///< Motor 3 Channel A
-static constexpr uint8_t PIN_M3_B = 19;        ///< Motor 3 Channel B
-
-// Motor 1 (Channels A+B)
+// Pin 40/41 haben auf der Teensy 4.1 KEINEN FlexPWM-/QuadTimer-Kanal, deshalb
+// taktet MotorHAL sie per IntervalTimer in Software (siehe motor_hal.hpp).
 static constexpr uint8_t PIN_M1_B = 40;        ///< Motor 1 Channel B
 static constexpr uint8_t PIN_M1_A = 41;        ///< Motor 1 Channel A
-// SCK
-static constexpr uint8_t PIN_SCK = 13;        ///< SCK
 
 // Motor 1 Quadratur-Encoder (A/B) - Closed-Loop Positionsregelung.
 // Verbaut: Pololu enc03d (0J12461) am Getriebemotor.
 //
 // Pin 0/1 sind in der Belegungstabelle die ARM-UART (Serial1). Der Roboterarm
-// wird in dieser Firmware nirgends instanziiert - es gibt kein Serial1.begin(),
-// nur die ungenutzten Aliase ARM_TX_PIN/ARM_RX_PIN in sensor_hal.hpp. Die Pins
-// sind damit reines GPIO und frei. Auf dem Teensy 4.1 ist jeder Digitalpin
-// interruptfähig, die Encoder-Bibliothek arbeitet hier also normal.
+// wird in dieser Firmware nirgends instanziiert - es gibt kein Serial1.begin().
+// Die Pins sind damit reines GPIO und frei. Auf dem Teensy 4.1 ist jeder
+// Digitalpin interruptfaehig, die Encoder-Bibliothek arbeitet hier normal.
 //
 // ACHTUNG: Sobald die ARM-Kommunikation dazukommt, kollidiert sie hier - dann
 // muss der Encoder umziehen (frei waeren dann z.B. 18+20).
@@ -119,7 +54,7 @@ static constexpr uint8_t PIN_M1_ENC_B = 1;     ///< Motor 1 Encoder Channel B
 // REXUS Signals
 // ===========================================================================
 // L0_t lag urspruenglich auf Pin 40 - dort haengt jetzt PIN_M1_B. REXUSHAL::init()
-// laeuft in System::init() NACH dem Motor und wuerde den Pin mit INPUT_PULLDOWN
+// laeuft in System::init() NACH dem Motor und wuerde den Pin als Eingang
 // zurueckkonfigurieren, der Motorkanal waere damit tot. Deshalb auf Pin 21
 // ausgewichen: frei, und ohnehin ohne PWM-Timer - ein reiner Digitaleingang
 // verschwendet dort also keinen der knappen PWM-faehigen Pins.
@@ -158,20 +93,7 @@ static constexpr uint8_t PIN_SODS_I = 38;      ///< SODS_i Signal
 static constexpr bool REXUS_ACTIVE_HIGH = false;
 
 // ===========================================================================
-// Sensors
+// Up/Down-link (Serial8, RS-422 zum REXUS-Servicemodul)
 // ===========================================================================
-// Chip Select Pins
-static constexpr uint8_t PIN_CS_ACCEL = 37;    ///< Chip Select Accelerometer
-static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope
-
-// ===========================================================================
-// Up/Down-link
-// ===========================================================================
-static constexpr uint8_t PIN_UPDOWNLINK_MINUS = 35;  ///< updownlink-
-static constexpr uint8_t PIN_UPDOWNLINK_PLUS = 34;  ///< updownlink+
-
-// ===========================================================================
-// HX711 Aliases (Sensor 1 - Purchased Scale)
-// ===========================================================================
-static constexpr uint8_t PIN_HX711_DOUT = PIN_FORCE_X_1;  ///< HX711 Data Out (mapped to Sensor 1)
-static constexpr uint8_t PIN_HX711_SCK = PIN_FORCE_Y_1;   ///< HX711 Serial Clock (mapped to Sensor 1)
+static constexpr uint8_t PIN_UPDOWNLINK_MINUS = 35;  ///< updownlink- (Serial8 TX)
+static constexpr uint8_t PIN_UPDOWNLINK_PLUS = 34;   ///< updownlink+ (Serial8 RX)

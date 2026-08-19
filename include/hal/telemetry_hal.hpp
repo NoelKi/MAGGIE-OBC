@@ -123,15 +123,15 @@ static constexpr uint8_t DL_STATUS1_IMU_VALID      = 0x02;  ///< bit1: IMU readi
 static constexpr uint8_t DL_MOTOR_STATE_ON          = 0x01;  ///< bit0: motor dauerhaft an (on())
 static constexpr uint8_t DL_MOTOR_STATE_MOVING      = 0x02;  ///< bit1: Closed-Loop-Fahrt aktiv
 static constexpr uint8_t DL_MOTOR_STATE_AT_TARGET   = 0x04;  ///< bit2: keine Fahrt aktiv / am Ziel
-static constexpr uint8_t DL_MOTOR_STATE_HDRM_OPEN   = 0x08;  ///< bit3: Position im Fenster "HDRM offen"
-static constexpr uint8_t DL_MOTOR_STATE_HDRM_CLOSED = 0x10;  ///< bit4: Position im Fenster "HDRM geschlossen"
+static constexpr uint8_t DL_MOTOR_STATE_HDRM_OPEN   = 0x08;  ///< bit3: Position im Fenster um +180° (HDRM offen)
+static constexpr uint8_t DL_MOTOR_STATE_HDRM_CLOSED = 0x10;  ///< bit4: Position im Fenster um 0° (HDRM zu)
 
 // SYS/STATE - subsystem byte bit definitions (DATA[1])
+// Bit 3 und 4 waren frueher Wiegesensor/Kraftsensor 2 und bleiben reserviert,
+// damit spaetere Sensoren ihre alten Bitpositionen zurueckbekommen koennen.
 static constexpr uint8_t DL_SUBSYS_IMU      = 0x01;  ///< bit0: IMU initialisiert
 static constexpr uint8_t DL_SUBSYS_MOTOR    = 0x02;  ///< bit1: Motor + Encoder initialisiert
 static constexpr uint8_t DL_SUBSYS_DOWNLINK = 0x04;  ///< bit2: Downlink-UART offen
-static constexpr uint8_t DL_SUBSYS_WEIGHT   = 0x08;  ///< bit3: Wiegesensor initialisiert
-static constexpr uint8_t DL_SUBSYS_FORCE    = 0x10;  ///< bit4: Kraftsensor 2 initialisiert
 
 class TelemetryDownlink {
 public:

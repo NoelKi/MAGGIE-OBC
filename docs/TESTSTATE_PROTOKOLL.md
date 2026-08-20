@@ -100,9 +100,10 @@ Wert nicht nachgemessen ist (siehe §5), sind nur die Counts belastbar.
 |---:|---:|---|
 | 0 | `0x01` | Motor dreht (`on()`) |
 | 1 | `0x02` | Encoder angehängt und wird gelesen |
+| 2 | `0x04` | Winkeldrehung (`MOTOR_TURN`) läuft |
 
-Bit 2..4 waren `MOVING`/`AT_TARGET`/`HDRM_OPEN`/`HDRM_CLOSED` der früheren
-Positionsregelung. Sie sind mit ihr entfallen und bleiben reserviert.
+Bit 3 und 4 waren `HDRM_OPEN`/`HDRM_CLOSED` der früheren Positionsregelung. Sie
+sind mit ihr entfallen und bleiben reserviert.
 
 **SYS/STATE `subsys`-Bits**: `0x01` IMU, `0x02` Motor, `0x04` Downlink —
 jeweils gesetzt, wenn beim Start initialisiert. Bit 3 und 4 waren Wiegesensor
@@ -133,6 +134,7 @@ also rund ein Drittel der 38400 Baud.
 | `0x00` | `MOTOR_OFF` | Motor aus | `POST /api/command/motor {"action":"off"}` |
 | `0x01` | `MOTOR_ON` | Motor dreht mit `ARG` als PWM, bis `MOTOR_OFF` kommt | `… {"action":"on","speed":120}` |
 | `0x05` | `MOTOR_ZERO` | Encoder-Zähler auf 0 setzen (stoppt den Motor) | `… {"action":"zero"}` |
+| `0x06` | `MOTOR_TURN` | Drehung um `ARG` Grad, stoppt selbst am Encoder-Ziel | `… {"action":"turn","angle":180}` |
 | `0x10` | `TEST_ENTER` | Bodentest betreten (nur aus `PRE_LAUNCH`) | `POST /api/command/test {"action":"enter"}` |
 | `0x11` | `TEST_EXIT` | Bodentest verlassen → `PRE_LAUNCH` | `… {"action":"exit"}` |
 | `0x1F` | `ABORT` | Missionsabbruch, Aktoren stoppen | `POST /api/command/abort` |
@@ -146,11 +148,28 @@ gibt die Drehrichtung vor. `ARG = 0` überlässt dem OBC seine
 `DEFAULT_ON_SPEED` (120, vorwärts). Der Server weist Werte außerhalb des
 Bereichs mit HTTP 400 ab, statt sie zu klemmen.
 
-**Der Motor stoppt nicht von selbst.** Es gibt keine Zielposition mehr. Beendet
-wird eine Fahrt durch `MOTOR_OFF`, durch `TEST_EXIT`/`ABORT` (der OBC stoppt die
-Aktoren beim Verlassen von `TEST`) — oder durch den Laufzeit-Watchdog
-`MOTOR_ON_TIMEOUT_MS` in `system.hpp`, der den Motor nach 30 s abschaltet.
-Die Konstante auf `0` zu setzen deaktiviert den Watchdog.
+**`MOTOR_ON` stoppt nicht von selbst.** Beendet wird ein Dauerlauf durch
+`MOTOR_OFF`, durch `TEST_EXIT`/`ABORT` (der OBC stoppt die Aktoren beim
+Verlassen von `TEST`) — oder durch den Laufzeit-Watchdog `MOTOR_ON_TIMEOUT_MS`
+in `system.hpp`, der den Motor nach 30 s abschaltet. Die Konstante auf `0` zu
+setzen deaktiviert den Watchdog.
+
+**`MOTOR_TURN`-Argument.** `ARG` ist der Drehwinkel in Grad, **relativ** zur
+aktuellen Position; das Vorzeichen gibt die Richtung vor. Der Server begrenzt
+auf ±3600° und weist `angle = 0` ab. Umgerechnet wird mit
+`COUNTS_PER_REV`: 180° = 2300 Counts.
+
+Das ist **keine Regelung**. Der Motor läuft mit der festen `TURN_SPEED`
+(`motor_hal.hpp`, bewusst unabhängig vom PWM-Schieber der Bodenstation, damit
+der Auslauf reproduzierbar bleibt), und `updateTurn()` schaltet ihn ab, sobald
+der Encoder das Ziel in Fahrtrichtung überschritten hat — der Encoder wirkt als
+Endschalter. Es wird weder die Geschwindigkeit nachgeführt noch am Ziel
+nachkorrigiert: Der Auslauf bleibt als Restfehler stehen und ist in der
+Telemetrie sichtbar (typisch wenige Counts, da das 380:1-Getriebe selbst bremst).
+
+Ohne Encoder verwirft der OBC `MOTOR_TURN`, statt ungebremst loszulaufen. Bleibt
+der Encoder während der Drehung stehen (Mechanik fest, Kanal ab), greift der
+Laufzeit-Watchdog.
 
 ---
 
@@ -184,13 +203,14 @@ Abweichung zur Platine: In `docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt` liegt
 `M1_B` auf Pin 14, Pin 19 ist dort `CAMDIR1`. 18/19 ist die Verdrahtung des
 Tischaufbaus — vor dem Flug abgleichen.
 
-Offen: `COUNTS_PER_REV = 4600` stammt aus dem Prototyp `hardwareTest/motor.cpp`
-und ist am eingebauten Pololu-Getriebemotor nicht nachgemessen. Der Wert steht
-doppelt — in `include/hal/motor_hal.hpp` und in
+`COUNTS_PER_REV = 4600` ist am Aufbau bestätigt und deckt sich mit der Rechnung
+aus den Bauteilen: Der Magnet-Encoder sitzt auf der **Motorwelle**, also ist
+`Counts/Abtriebsumdrehung = Encoder-CPR × Getriebeübersetzung` = 12 × 380 = 4560.
+
+Der Wert steht doppelt — in `include/hal/motor_hal.hpp` und in
 `MAGGIE_SERVER/app/services/downlink_frame_parser.py` — und muss an beiden
-Stellen gleich sein. Er betrifft nur noch die Winkelanzeige; die Encoder-Counts
-sind davon unabhängig. Nachmessen: `MOTOR_ZERO` senden, den Motor eine
-Wellenumdrehung drehen lassen, Counts ablesen.
+Stellen gleich sein. Er bestimmt die Winkelanzeige **und** das Ziel von
+`MOTOR_TURN`; die rohen Encoder-Counts sind davon unabhängig.
 
 ---
 
@@ -208,9 +228,12 @@ Wellenumdrehung drehen lassen, Counts ablesen.
 5. **Richtung umkehren** und erneut **Drehen** → die Counts laufen rückwärts,
    PWM ist zeigt -120. Damit sind beide Drehrichtungen und das Vorzeichen des
    Encoders verifiziert.
-6. *Telemetrie* zeigt IMU-Beschleunigung/Drehrate sowie Encoder-Counts, Winkel
+6. **½ Umdrehung** → der Motor läuft an, der Chip zeigt „Drehung um 180° läuft",
+   und der OBC stoppt nach 2300 Counts von selbst. Der Endwert liegt um den
+   Auslauf über dem Ziel — genau das ist die Aussage des Tests.
+7. *Telemetrie* zeigt IMU-Beschleunigung/Drehrate sowie Encoder-Counts, Winkel
    und PWM als Live-Verlauf.
-7. **Test-Modus verlassen** — der Motor stoppt, die Aktoren sind wieder
+8. **Test-Modus verlassen** — der Motor stoppt, die Aktoren sind wieder
    gesperrt.
 
 Ohne Hardware lässt sich derselbe Ablauf mit

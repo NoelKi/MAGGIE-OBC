@@ -120,10 +120,11 @@ static constexpr uint8_t DL_STATUS1_SYSTEM_HEALTHY = 0x01;  ///< bit0: system he
 static constexpr uint8_t DL_STATUS1_IMU_VALID      = 0x02;  ///< bit1: IMU reading valid
 
 // MOTOR/STATE - state byte bit definitions (DATA[6])
-// Bit 2..4 waren MOVING / AT_TARGET / HDRM_OPEN / HDRM_CLOSED der frueheren
-// Positionsregelung und sind mit ihr entfallen. Bleiben reserviert.
+// Bit 3 und 4 waren HDRM_OPEN / HDRM_CLOSED der frueheren Positionsregelung
+// und sind mit ihr entfallen. Bleiben reserviert.
 static constexpr uint8_t DL_MOTOR_STATE_ON         = 0x01;  ///< bit0: Motor dreht (on())
 static constexpr uint8_t DL_MOTOR_STATE_ENCODER_OK = 0x02;  ///< bit1: Encoder angehaengt und wird gelesen
+static constexpr uint8_t DL_MOTOR_STATE_TURNING    = 0x04;  ///< bit2: turnBy()-Drehung laeuft
 
 // SYS/STATE - subsystem byte bit definitions (DATA[1])
 // Bit 3 und 4 waren frueher Wiegesensor/Kraftsensor 2 und bleiben reserviert,

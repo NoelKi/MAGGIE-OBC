@@ -22,10 +22,10 @@
 
 class MotorHAL {
 public:
-    /// Counts pro voller Umdrehung - stammt aus dem Prototyp
-    /// hardwareTest/motor.cpp und ist am verbauten Getriebemotor NICHT
-    /// nachgemessen. Wird nur noch fuer die Winkelanzeige am Boden gebraucht
-    /// (Gegenstueck: MAGGIE_SERVER/app/services/downlink_frame_parser.py).
+    /// Counts pro voller Umdrehung der Abtriebswelle, am Aufbau bestaetigt.
+    /// Deckt sich mit der Rechnung 12 CPR x 380:1 Getriebe = 4560.
+    /// Basis fuer die Winkelanzeige am Boden und fuer turnBy().
+    /// Gegenstueck: MAGGIE_SERVER/app/services/downlink_frame_parser.py.
     static constexpr long COUNTS_PER_REV = 4600;
 
     /**
@@ -118,10 +118,33 @@ public:
      */
     void on(int16_t speed = 0);
 
-    /** @brief Motor ausschalten. */
+    /** @brief Motor ausschalten (bricht eine laufende turnBy()-Drehung ab). */
     void off();
 
+    /**
+     * @brief Dreht um einen festen Winkel und stoppt am Ziel.
+     * @param degrees Drehwinkel, Vorzeichen = Richtung. 0 tut nichts.
+     *
+     * KEINE Regelung: Der Motor laeuft mit konstantem TURN_SPEED, und
+     * updateTurn() schaltet ihn ab, sobald der Encoder die Zielcounts
+     * ueberschritten hat - der Encoder wirkt also als Endschalter, nicht als
+     * Regelgroesse. Es wird weder die Geschwindigkeit nachgefuehrt noch am Ziel
+     * nachkorrigiert; der Auslauf bleibt als Restfehler stehen und ist in der
+     * Telemetrie sichtbar.
+     *
+     * Ohne Encoder passiert nichts (sonst liefe der Motor ungebremst weiter).
+     */
+    void turnBy(int16_t degrees);
+
+    /**
+     * @brief Prueft, ob eine turnBy()-Drehung ihr Ziel erreicht hat.
+     * Muss zyklisch (jeden Loop) aufgerufen werden. Ohne laufende Drehung
+     * kehrt die Funktion sofort zurueck.
+     */
+    void updateTurn();
+
     bool isOn() const { return is_on_; }          ///< Dauer-An/Aus-Zustand (on()/off())
+    bool isTurning() const { return turning_; }   ///< turnBy()-Drehung laeuft
     bool hasEncoder() const { return enc_ != nullptr; }
 
 private:
@@ -133,6 +156,9 @@ private:
 
     Encoder* enc_ = nullptr;   ///< Quadratur-Encoder (nullptr = keine Messung)
     bool is_on_  = false;      ///< logischer An/Aus-Zustand (on()/off())
+
+    bool turning_    = false;  ///< eine turnBy()-Drehung laeuft
+    long turn_target_ = 0;     ///< absolute Zielposition dieser Drehung in Counts
 
     // -----------------------------------------------------------------------
     // Software-PWM fuer Pins ohne Hardware-Timer
@@ -167,5 +193,10 @@ private:
 
     /// Geschwindigkeit fuer on() ohne Argument. Muss ueber dem Losbrechmoment
     /// liegen, sonst brummt der Motor nur.
-    static constexpr int16_t DEFAULT_ON_SPEED = 120;
+    static constexpr int16_t DEFAULT_ON_SPEED = 210;
+
+    /// Feste Geschwindigkeit fuer turnBy(). Bewusst NICHT vom PWM-Schieber der
+    /// Bodenstation abhaengig: Der Auslauf am Ziel haengt an der Drehzahl, mit
+    /// konstantem Wert ist der Restfehler von Drehung zu Drehung reproduzierbar.
+    static constexpr int16_t TURN_SPEED = DEFAULT_ON_SPEED;
 };

@@ -19,7 +19,8 @@
  *  ----+---------+-------+---------------------------------------------
  *   0  | START   |  1    | UL_START (0x7E)
  *   1  | OPCODE  |  1    | UplinkOpcode
- *  2-3 | ARG     |  2    | int16 big-endian (bei MOTOR_ON: Speed -255..+255)
+ *  2-3 | ARG     |  2    | int16 big-endian (MOTOR_ON: Speed -255..+255,
+ *      |         |       | MOTOR_TURN: Drehwinkel in Grad)
  *   4  | CRC     |  1    | CRC-8 (poly 0x07) über Bytes 1..3
  *   5  | END     |  1    | UL_END (0x7F)
  *
@@ -50,6 +51,7 @@ enum class UplinkOpcode : uint8_t {
     // moeglicherweise noch.
 
     MOTOR_ZERO      = 0x05,   ///< Encoder-Zaehler auf 0 setzen (stoppt den Motor)
+    MOTOR_TURN      = 0x06,   ///< Drehung um ARG Grad, stoppt am Ziel (ARG signed)
 
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH

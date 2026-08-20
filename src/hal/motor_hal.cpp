@@ -143,8 +143,7 @@ long MotorHAL::getPosition() {
 }
 
 void MotorHAL::zeroPosition() {
-    setSpeed(0);
-    is_on_ = false;
+    off();
     if (enc_) enc_->write(0);
 }
 
@@ -152,11 +151,46 @@ void MotorHAL::on(int16_t speed) {
     if (speed == 0) speed = DEFAULT_ON_SPEED;
     if (speed >  255) speed =  255;
     if (speed < -255) speed = -255;
-    is_on_ = true;
+    turning_ = false;          // Handbetrieb schlaegt eine laufende Drehung
+    is_on_   = true;
     setSpeed(speed);
 }
 
 void MotorHAL::off() {
-    is_on_ = false;
+    turning_ = false;
+    is_on_   = false;
     setSpeed(0);
+}
+
+void MotorHAL::turnBy(int16_t degrees) {
+    // Ohne Encoder gaebe es kein Abschaltkriterium - der Motor liefe bis zum
+    // MOTOR_OFF bzw. bis der Laufzeit-Watchdog in System zugreift. Lieber gar
+    // nicht erst anfahren.
+    if (!enc_ || degrees == 0) return;
+
+    const long delta = static_cast<long>(degrees) * COUNTS_PER_REV / 360;
+    if (delta == 0) return;    // Winkel zu klein fuer einen ganzen Count
+
+    on(delta > 0 ? TURN_SPEED : -TURN_SPEED);   // setzt turning_ zurueck
+    turn_target_ = enc_->read() + delta;
+    turning_     = true;
+
+    Serial.printf("INFO  [MotorHAL]: Drehung um %d Grad (%ld Counts) -> Ziel %ld.\n",
+                  degrees, delta, turn_target_);
+}
+
+void MotorHAL::updateTurn() {
+    if (!turning_ || !enc_) return;
+
+    // Vergleich in Fahrtrichtung, nicht ueber den Betrag: Ein simples
+    // labs(pos - target) <= Toleranz wuerde bei zu grosser Schrittweite
+    // zwischen zwei Loops uebersprungen und die Drehung liefe endlos weiter.
+    const long pos     = enc_->read();
+    const bool reached = current_speed_ > 0 ? pos >= turn_target_
+                                            : pos <= turn_target_;
+    if (!reached) return;
+
+    off();
+    Serial.printf("INFO  [MotorHAL]: Drehung beendet - Position %ld (Ziel %ld).\n",
+                  pos, turn_target_);
 }

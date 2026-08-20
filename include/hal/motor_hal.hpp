@@ -9,30 +9,24 @@
  * @file motor_hal.hpp
  * @brief Hardware Abstraction Layer for Motor Control (DRV8871)
  *
- * Provides PWM control for a DRV8871 H-bridge motor (channels A/B) and,
- * optionally, closed-loop position control via a quadrature encoder.
+ * Reine Steuerung (Open Loop) einer DRV8871-H-Bruecke ueber die Kanaele A/B.
+ * Der Quadratur-Encoder haengt optional daran, wird aber NUR als Sensor
+ * gelesen - es gibt keine Positionsregelung. Ein einmal gestarteter Motor
+ * dreht, bis off() kommt.
  *
- * Die Positionsregelung (moveTo/halfTurn/update) stammt aus dem getesteten
- * Prototyp hardwareTest/motor.cpp, wurde aber von einer blockierenden
- * while-Schleife auf einen nicht-blockierenden Schritt (update()) umgestellt,
- * damit sie im normalen System::run()-Loop laufen kann.
+ * Die frueheren Fahrten auf Encoder-Ziel (moveTo/halfTurn/update mit P-Regler,
+ * Stall- und Zeitueberwachung) sind entfallen: Der Bodentest soll die
+ * Telecommand-Strecke und den Motor selbst pruefen, nicht die Regelung. Der
+ * Encoder ist damit Messmittel statt Regelgroesse.
  */
 
 class MotorHAL {
 public:
-    // Positionsregelung: an den verbauten Encoder/Getriebe angepasst
-    // (kalibriert in hardwareTest/motor.cpp).
-    static constexpr long COUNTS_PER_REV = 4600;                ///< Counts pro voller Umdrehung
-    static constexpr long HALF_TURN      = COUNTS_PER_REV / 2;  ///< 180° ≈ 2300 Counts
-
-    // Referenzpositionen fuer die Zustandsmeldung an die Bodenstation. Bezug
-    // ist die Encoder-Nullposition, die beim Start bzw. per zeroPosition()
-    // gesetzt wird. Die Fahrten selbst (halfTurnForward/-Reverse) sind RELATIV,
-    // diese Fenster sagen nur, ob der Motor gerade am Nullpunkt oder eine halbe
-    // Umdrehung davon entfernt steht (HDRM zu bzw. offen).
-    static constexpr long ZERO_COUNTS      = 0;                 ///< Nullposition (HDRM verriegelt)
-    static constexpr long HALF_TURN_COUNTS = HALF_TURN;         ///< 180° (HDRM freigegeben)
-    static constexpr long POS_WINDOW_COUNTS = 60;               ///< Fenster für die Zustandsmeldung
+    /// Counts pro voller Umdrehung - stammt aus dem Prototyp
+    /// hardwareTest/motor.cpp und ist am verbauten Getriebemotor NICHT
+    /// nachgemessen. Wird nur noch fuer die Winkelanzeige am Boden gebraucht
+    /// (Gegenstueck: MAGGIE_SERVER/app/services/downlink_frame_parser.py).
+    static constexpr long COUNTS_PER_REV = 4600;
 
     /**
      * @brief Constructor for Motor HAL
@@ -50,7 +44,7 @@ public:
     bool init();
 
     /**
-     * @brief Quadratur-Encoder anhängen (aktiviert die Closed-Loop-Regelung)
+     * @brief Quadratur-Encoder anhängen (reine Positionsmessung)
      * @param pin_enc_a Encoder Channel A
      * @param pin_enc_b Encoder Channel B
      * @return true if successful
@@ -88,7 +82,8 @@ public:
      * @brief true, wenn dieser Motor per Software-PWM getaktet wird.
      *
      * Greift automatisch, sobald einer der beiden Kanaele auf einem Pin ohne
-     * PWM-Timer liegt (z.B. 40/41 auf der Teensy 4.1).
+     * PWM-Timer liegt (z.B. 40/41 auf der Teensy 4.1). Mit der aktuellen
+     * Belegung (18/19, beide QuadTimer) bleibt der Modus aus.
      */
     bool usesSoftPwm() const { return soft_pwm_; }
 
@@ -101,55 +96,33 @@ public:
     static bool pinHasHardwarePwm(uint8_t pin);
 
     // -----------------------------------------------------------------------
-    // Closed-Loop Positionsregelung (benötigt Encoder, siehe initEncoder)
+    // Encoder (reine Messung, siehe initEncoder)
     // -----------------------------------------------------------------------
 
     /** @brief Aktuelle Encoder-Position in Quadratur-Counts (0 ohne Encoder). */
     long getPosition();
 
-    /** @brief Startet eine geregelte Fahrt auf die absolute Zielposition. */
-    void moveTo(long target);
-
-    /** @brief Dreht eine halbe Umdrehung vorwaerts (+180°) ab der aktuellen Position. */
-    void halfTurnForward();
-
-    /** @brief Dreht eine halbe Umdrehung rueckwaerts (-180°) ab der aktuellen Position. */
-    void halfTurnReverse();
-
     /**
-     * @brief Setzt die aktuelle Position als Nullpunkt ("HDRM geschlossen").
-     * Bricht eine laufende Fahrt ab und stoppt den Motor.
+     * @brief Setzt den Encoder-Zaehler auf 0 und stoppt den Motor.
+     *
+     * Keine Regelung - nur ein Nullpunkt fuer die Anzeige am Boden. Damit
+     * laesst sich COUNTS_PER_REV am Tisch nachmessen: nullen, eine
+     * Wellenumdrehung drehen lassen, Counts ablesen.
      */
     void zeroPosition();
 
-    /** @brief true, wenn die Position im Fenster um den Nullpunkt liegt. */
-    bool isAtZero();
+    /**
+     * @brief Motor dauerhaft drehen lassen.
+     * @param speed -255..+255, Vorzeichen = Drehrichtung.
+     *              0 nimmt DEFAULT_ON_SPEED (vorwaerts).
+     */
+    void on(int16_t speed = 0);
 
-    /** @brief true, wenn die Position im Fenster um +180° liegt. */
-    bool isAtHalfTurn();
-
-    /** @brief Motor dauerhaft mit Default-Geschwindigkeit einschalten. */
-    void on();
-
-    /** @brief Motor ausschalten (stoppt und bricht eine laufende Fahrt ab). */
+    /** @brief Motor ausschalten. */
     void off();
 
-    /**
-     * @brief Regelungsschritt - muss zyklisch (jeden Loop) aufgerufen werden.
-     * Führt bei einer laufenden moveTo()-Fahrt einen P-Regler-Schritt aus und
-     * stoppt am Ziel. Ohne laufende Fahrt tut update() nichts.
-     */
-    void update();
-
     bool isOn() const { return is_on_; }          ///< Dauer-An/Aus-Zustand (on()/off())
-    bool isMoving() const { return moving_; }      ///< Closed-Loop-Fahrt aktiv
     bool hasEncoder() const { return enc_ != nullptr; }
-
-    /**
-     * @brief Wurde die letzte Fahrt abgebrochen, statt das Ziel zu erreichen?
-     * Wird bei jedem neuen moveTo() zurueckgesetzt. Siehe MOVE_TIMEOUT_MS.
-     */
-    bool moveFailed() const { return move_failed_; }
 
 private:
     uint8_t pin_a_;
@@ -158,19 +131,8 @@ private:
     int16_t current_speed_ = 0;
     bool initialized_ = false;
 
-    Encoder* enc_ = nullptr;   ///< Quadratur-Encoder (nullptr = keine Regelung)
+    Encoder* enc_ = nullptr;   ///< Quadratur-Encoder (nullptr = keine Messung)
     bool is_on_  = false;      ///< logischer An/Aus-Zustand (on()/off())
-    bool moving_ = false;      ///< eine geregelte Fahrt läuft
-    long target_ = 0;          ///< Zielposition der laufenden Fahrt
-
-    // Ueberwachung der laufenden Fahrt, siehe MOVE_TIMEOUT_MS/STALL_WINDOW_MS.
-    uint32_t move_start_ms_ = 0;   ///< Start der laufenden Fahrt
-    uint32_t stall_ref_ms_  = 0;   ///< Beginn des aktuellen Stillstandsfensters
-    long     stall_ref_pos_ = 0;   ///< Position zu Beginn dieses Fensters
-    bool     move_failed_   = false; ///< letzte Fahrt wurde abgebrochen
-
-    /// Fahrt stoppen und als gescheitert markieren (mit Log-Ausgabe).
-    void abortMove(const char* reason);
 
     // -----------------------------------------------------------------------
     // Software-PWM fuer Pins ohne Hardware-Timer
@@ -203,23 +165,7 @@ private:
     /** @brief Schreibt beide Kanaele - je nach Modus per analogWrite oder Soft-PWM. */
     void writeChannels(uint8_t duty_a, uint8_t duty_b);
 
-    // P-Regler-Parameter (aus hardwareTest/motor.cpp).
-    static constexpr float   Kp        = 0.8f;   ///< Regler-Verstärkung
-    static constexpr int     MIN_PWM   = 10;     ///< Losbrech-PWM
-    static constexpr int     MAX_PWM   = 60;     ///< Obergrenze der Regel-PWM
-    static constexpr long    POS_TOL   = 5;      ///< Zielfenster in Counts
-    static constexpr int16_t DEFAULT_ON_SPEED = 120; ///< Geschwindigkeit für on()
-
-    // -----------------------------------------------------------------------
-    // Abbruchkriterien für geregelte Fahrten (moveTo/halfTurn/hdrmOpen/-Close)
-    // -----------------------------------------------------------------------
-    // Ohne diese Grenzen faehrt der Motor unbegrenzt weiter, sobald das Ziel
-    // nicht erreichbar ist: update() sieht dann nie labs(error) <= POS_TOL.
-    // Passiert bei totem oder unverdrahtetem Encoder (Position steht), bei
-    // blockierter Mechanik und bei verpolten Encoder-Kanaelen (Position laeuft
-    // vom Ziel weg). Fuer den HDRM heisst das: Motor im Anschlag, bis jemand
-    // MOTOR_OFF sendet.
-    static constexpr uint32_t MOVE_TIMEOUT_MS  = 8000;  ///< harte Obergrenze je Fahrt
-    static constexpr uint32_t STALL_WINDOW_MS  = 1000;  ///< Fenster ohne Fortschritt
-    static constexpr long     STALL_MIN_COUNTS = 3;     ///< Fortschritt, der als Bewegung zaehlt
+    /// Geschwindigkeit fuer on() ohne Argument. Muss ueber dem Losbrechmoment
+    /// liegen, sonst brummt der Motor nur.
+    static constexpr int16_t DEFAULT_ON_SPEED = 120;
 };

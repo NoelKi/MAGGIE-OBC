@@ -19,7 +19,7 @@
  *  ----+---------+-------+---------------------------------------------
  *   0  | START   |  1    | UL_START (0x7E)
  *   1  | OPCODE  |  1    | UplinkOpcode
- *  2-3 | ARG     |  2    | int16 big-endian (optionales Argument)
+ *  2-3 | ARG     |  2    | int16 big-endian (bei MOTOR_ON: Speed -255..+255)
  *   4  | CRC     |  1    | CRC-8 (poly 0x07) über Bytes 1..3
  *   5  | END     |  1    | UL_END (0x7F)
  *
@@ -41,12 +41,15 @@ static constexpr uint8_t UPLINK_FRAME_SIZE = 6;
  * 0x1x = System/Zustandsmaschine
  */
 enum class UplinkOpcode : uint8_t {
-    MOTOR_OFF       = 0x00,   ///< Motor ausschalten (bricht Fahrt ab)
-    MOTOR_ON        = 0x01,   ///< Motor dauerhaft einschalten (offene Steuerung)
-    MOTOR_HALF_TURN = 0x02,   ///< Altbestand: identisch zu HALF_TURN_FWD
-    HALF_TURN_FWD   = 0x03,   ///< halbe Umdrehung vorwaerts (relativ +180°)
-    HALF_TURN_REV   = 0x04,   ///< halbe Umdrehung rueckwaerts (relativ -180°)
-    MOTOR_ZERO      = 0x05,   ///< aktuelle Position als Nullpunkt setzen
+    MOTOR_OFF       = 0x00,   ///< Motor ausschalten
+    MOTOR_ON        = 0x01,   ///< Motor drehen; ARG = Speed -255..+255 (0 = Default)
+
+    // 0x02..0x04 stillgelegt: MOTOR_HALF_TURN / HALF_TURN_FWD / HALF_TURN_REV.
+    // Die Positionsregelung ist entfallen, der Encoder ist nur noch Sensor.
+    // Werte NICHT neu vergeben - aeltere Server-/Simulatorstaende senden sie
+    // moeglicherweise noch.
+
+    MOTOR_ZERO      = 0x05,   ///< Encoder-Zaehler auf 0 setzen (stoppt den Motor)
 
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH

@@ -135,104 +135,28 @@ void MotorHAL::setPWMFrequency(uint32_t frequency) {
 }
 
 // ---------------------------------------------------------------------------
-// Closed-Loop Positionsregelung
+// Encoder (reine Messung) und Dauerbetrieb
 // ---------------------------------------------------------------------------
 
 long MotorHAL::getPosition() {
     return enc_ ? enc_->read() : 0;
 }
 
-void MotorHAL::moveTo(long target) {
-    if (!enc_) return;      // ohne Encoder keine Positionsregelung
-    target_ = target;
-    moving_ = true;
-
-    // Ueberwachung der Fahrt scharf schalten (siehe update()).
-    const uint32_t now = millis();
-    move_start_ms_ = now;
-    stall_ref_ms_  = now;
-    stall_ref_pos_ = enc_->read();
-    move_failed_   = false;
-}
-
-void MotorHAL::halfTurnForward() {
-    if (!enc_) return;
-    moveTo(getPosition() + HALF_TURN);
-}
-
-void MotorHAL::halfTurnReverse() {
-    if (!enc_) return;
-    moveTo(getPosition() - HALF_TURN);
-}
-
 void MotorHAL::zeroPosition() {
-    moving_ = false;
-    target_ = 0;
     setSpeed(0);
+    is_on_ = false;
     if (enc_) enc_->write(0);
 }
 
-bool MotorHAL::isAtHalfTurn() {
-    return enc_ && labs(getPosition() - HALF_TURN_COUNTS) <= POS_WINDOW_COUNTS;
-}
-
-bool MotorHAL::isAtZero() {
-    return enc_ && labs(getPosition() - ZERO_COUNTS) <= POS_WINDOW_COUNTS;
-}
-
-void MotorHAL::on() {
-    moving_ = false;                 // eventuelle Fahrt abbrechen
-    is_on_  = true;
-    setSpeed(DEFAULT_ON_SPEED);
+void MotorHAL::on(int16_t speed) {
+    if (speed == 0) speed = DEFAULT_ON_SPEED;
+    if (speed >  255) speed =  255;
+    if (speed < -255) speed = -255;
+    is_on_ = true;
+    setSpeed(speed);
 }
 
 void MotorHAL::off() {
-    moving_ = false;
-    is_on_  = false;
+    is_on_ = false;
     setSpeed(0);
-}
-
-void MotorHAL::abortMove(const char* reason) {
-    setSpeed(0);
-    moving_      = false;
-    move_failed_ = true;
-    Serial.printf("WARN  [MotorHAL]: Fahrt abgebrochen (%s) - Position %ld, Ziel %ld.\n",
-                  reason, getPosition(), target_);
-}
-
-void MotorHAL::update() {
-    if (!moving_ || !enc_) return;   // nur laufende Fahrten regeln
-
-    const long pos   = enc_->read();
-    const long error = target_ - pos;
-
-    if (labs(error) <= POS_TOL) {    // Ziel erreicht
-        setSpeed(0);
-        moving_ = false;
-        return;
-    }
-
-    const uint32_t now = millis();
-
-    // Notbremse 1: Gesamtlaufzeit. Faengt auch den Fall ab, dass die Position
-    // sich zwar bewegt, aber vom Ziel weg (verpolte Encoder-Kanaele).
-    if (now - move_start_ms_ >= MOVE_TIMEOUT_MS) {
-        abortMove("Zeitlimit");
-        return;
-    }
-
-    // Notbremse 2: Stillstand. Kommt die Position im Fenster nicht voran,
-    // sitzt die Mechanik fest oder der Encoder liefert nichts - dann treibt
-    // Weiterfahren den Motor nur in den Anschlag.
-    if (labs(pos - stall_ref_pos_) >= STALL_MIN_COUNTS) {
-        stall_ref_pos_ = pos;        // Fortschritt -> Fenster neu aufziehen
-        stall_ref_ms_  = now;
-    } else if (now - stall_ref_ms_ >= STALL_WINDOW_MS) {
-        abortMove("kein Fortschritt - Encoder oder Mechanik pruefen");
-        return;
-    }
-
-    int pwm = static_cast<int>(Kp * labs(error));
-    pwm = constrain(pwm, MIN_PWM, MAX_PWM);
-    setSpeed(static_cast<int16_t>(error > 0 ? pwm : -pwm));
 }

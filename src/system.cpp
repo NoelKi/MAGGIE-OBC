@@ -53,7 +53,7 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
-    // Motor 1 (DRV8871 + Quadratur-Encoder, Closed-Loop Positionsregelung)
+    // Motor 1 (DRV8871, ungeregelt + Quadratur-Encoder als Sensor)
     // Fehler hier sind NICHT fatal: das System laeuft ohne Motor weiter.
     // -----------------------------------------------------------------------
     Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder)...");
@@ -115,8 +115,8 @@ void System::run() {
     // Zustand fortschreiben (Telecommands)
     handleStateMachine(now);
 
-    // Closed-Loop-Positionsregelung des Motors einen Schritt weiterführen
-    if (motor_) motor_->update();
+    // Laufzeitbegrenzung des Motors prüfen
+    handleMotorTimeout(now);
 
     // Telemetrie-Downlink periodisch senden (IMU + Motor)
     if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
@@ -151,15 +151,11 @@ void System::handleMotorTelemetry() {
     const int32_t position = static_cast<int32_t>(motor_->getPosition());
     const int16_t speed    = motor_->getSpeed();
 
+    // ENCODER_OK unterscheidet am Boden "Motor dreht nicht" von "Encoder ist
+    // gar nicht angehaengt" - beides sieht in den Counts gleich aus.
     uint8_t state = 0;
-    if (motor_->isOn())     state |= DL_MOTOR_STATE_ON;
-    if (motor_->isMoving()) state |= DL_MOTOR_STATE_MOVING;
-    else                    state |= DL_MOTOR_STATE_AT_TARGET;
-
-    // Stellung aus der Encoder-Position ableiten, damit die Bodenstation sie
-    // nicht selbst aus den Counts rekonstruieren muss.
-    if (motor_->isAtHalfTurn()) state |= DL_MOTOR_STATE_HDRM_OPEN;
-    if (motor_->isAtZero())     state |= DL_MOTOR_STATE_HDRM_CLOSED;
+    if (motor_->isOn())        state |= DL_MOTOR_STATE_ON;
+    if (motor_->hasEncoder())  state |= DL_MOTOR_STATE_ENCODER_OK;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -295,28 +291,36 @@ bool System::handleMotorCommand(const UplinkCommand& cmd) {
 
     switch (static_cast<UplinkOpcode>(cmd.opcode)) {
         case UplinkOpcode::MOTOR_ON:
-            Serial.println("INFO  [System]: TC MOTOR_ON");
-            motor_->on();
+            Serial.printf("INFO  [System]: TC MOTOR_ON (speed=%d)\n", cmd.arg);
+            motor_->on(cmd.arg);
+            motor_on_since_ms_ = millis();
             return true;
         case UplinkOpcode::MOTOR_OFF:
             Serial.println("INFO  [System]: TC MOTOR_OFF");
             motor_->off();
             return true;
-        case UplinkOpcode::MOTOR_HALF_TURN:   // Altbestand, gleiche Fahrt wie 0x03
-        case UplinkOpcode::HALF_TURN_FWD:
-            Serial.println("INFO  [System]: TC HALF_TURN_FWD (relativ +180 Grad)");
-            motor_->halfTurnForward();
-            return true;
-        case UplinkOpcode::HALF_TURN_REV:
-            Serial.println("INFO  [System]: TC HALF_TURN_REV (relativ -180 Grad)");
-            motor_->halfTurnReverse();
-            return true;
         case UplinkOpcode::MOTOR_ZERO:
-            Serial.println("INFO  [System]: TC MOTOR_ZERO - aktuelle Position = Nullpunkt");
+            Serial.println("INFO  [System]: TC MOTOR_ZERO - Encoder-Zaehler auf 0");
             motor_->zeroPosition();
             return true;
         default:
             return false;
+    }
+}
+
+void System::handleMotorTimeout(uint32_t now_ms) {
+    // Ohne Positionsregelung endet eine Motorfahrt nicht mehr von selbst - der
+    // Motor dreht, bis MOTOR_OFF kommt. Wenn ausgerechnet die Uplink-Strecke
+    // der Prueflig ist, ist das am Tisch ein Risiko. Der Watchdog ist die
+    // Rueckfallebene; MOTOR_ON_TIMEOUT_MS = 0 schaltet ihn ab.
+    if (MOTOR_ON_TIMEOUT_MS == 0) return;
+    if (!motor_ready_ || !motor_ || !motor_->isOn()) return;
+
+    if (now_ms - motor_on_since_ms_ >= MOTOR_ON_TIMEOUT_MS) {
+        Serial.printf("WARN  [System]: Motor-Laufzeit ueber %lu ms - "
+                      "automatisch gestoppt. Erneut MOTOR_ON senden.\n",
+                      static_cast<unsigned long>(MOTOR_ON_TIMEOUT_MS));
+        motor_->off();
     }
 }
 

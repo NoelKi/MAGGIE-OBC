@@ -32,12 +32,21 @@ static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope
 // ===========================================================================
 // Motor 1 - HDRM-Antrieb (DRV8871)
 // ===========================================================================
-// Pin 40/41 haben auf der Teensy 4.1 KEINEN FlexPWM-/QuadTimer-Kanal, deshalb
-// taktet MotorHAL sie per IntervalTimer in Software (siehe motor_hal.hpp).
-static constexpr uint8_t PIN_M1_B = 40;        ///< Motor 1 Channel B
-static constexpr uint8_t PIN_M1_A = 41;        ///< Motor 1 Channel A
+// Beide Pins haben auf der Teensy 4.1 einen QuadTimer-Kanal, MotorHAL taktet
+// sie also per analogWrite() in Hardware mit 20 kHz - die Software-PWM
+// (IntervalTimer, siehe motor_hal.hpp) greift hier nicht.
+//
+// Kanal A ist die Vorwaertsrichtung: setSpeed(+x) legt die PWM auf A, B bleibt
+// LOW. Dreht der Motor verkehrt herum, die beiden Zeilen tauschen.
+//
+// ACHTUNG: In docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt liegt M1_B auf Pin 14,
+// Pin 19 ist dort CAMDIR1 (Kamera-MUX, in dieser Firmware nicht instanziiert).
+// 18/19 ist die Verdrahtung des Tischaufbaus (wie in hardwareTest/motor.cpp);
+// vor dem Flug gegen die Platine abgleichen.
+static constexpr uint8_t PIN_M1_A = 18;        ///< Motor 1 Channel A (vorwaerts)
+static constexpr uint8_t PIN_M1_B = 19;        ///< Motor 1 Channel B (rueckwaerts)
 
-// Motor 1 Quadratur-Encoder (A/B) - Closed-Loop Positionsregelung.
+// Motor 1 Quadratur-Encoder (A/B) - reine Positionsmessung, keine Regelung.
 // Verbaut: Pololu enc03d (0J12461) am Getriebemotor.
 //
 // Pin 0/1 sind in der Belegungstabelle die ARM-UART (Serial1). Der Roboterarm
@@ -46,18 +55,24 @@ static constexpr uint8_t PIN_M1_A = 41;        ///< Motor 1 Channel A
 // Digitalpin interruptfaehig, die Encoder-Bibliothek arbeitet hier normal.
 //
 // ACHTUNG: Sobald die ARM-Kommunikation dazukommt, kollidiert sie hier - dann
-// muss der Encoder umziehen (frei waeren dann z.B. 18+20).
+// muss der Encoder umziehen. Laut Belegungstabelle sind 5+6 die eigentlichen
+// Encoder-Pins von Motor 1 (ENC_HDRM1A/B).
 static constexpr uint8_t PIN_M1_ENC_A = 0;     ///< Motor 1 Encoder Channel A
 static constexpr uint8_t PIN_M1_ENC_B = 1;     ///< Motor 1 Encoder Channel B
 
 // ===========================================================================
 // REXUS Signals
 // ===========================================================================
-// L0_t lag urspruenglich auf Pin 40 - dort haengt jetzt PIN_M1_B. REXUSHAL::init()
-// laeuft in System::init() NACH dem Motor und wuerde den Pin als Eingang
-// zurueckkonfigurieren, der Motorkanal waere damit tot. Deshalb auf Pin 21
-// ausgewichen: frei, und ohnehin ohne PWM-Timer - ein reiner Digitaleingang
-// verschwendet dort also keinen der knappen PWM-faehigen Pins.
+// L0_t liegt laut Belegungstabelle auf Pin 40. Als der Motor dort noch seinen
+// Kanal B hatte, kollidierten die beiden: REXUSHAL::init() laeuft in
+// System::init() NACH dem Motor und haette den Pin als Eingang
+// zurueckkonfiguriert - der Motorkanal waere tot gewesen. Deshalb das
+// Ausweichen auf Pin 21.
+//
+// Seit der Motor auf 18/19 sitzt, ist Pin 40 wieder frei; L0_t koennte also
+// zurueck auf seinen dokumentierten Pin. Bewusst noch nicht umgestellt, weil
+// der Tischaufbau auf 21 verdrahtet ist. Pin 21 ist in der Tabelle CAM1_TX -
+// sobald die Kamera dazukommt, muss L0_t ohnehin zurueck auf 40.
 // TODO: vor dem Flug gegen docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt abgleichen.
 static constexpr uint8_t PIN_L0_T = 21;        ///< L0_t Signal
 static constexpr uint8_t PIN_SOE_I = 39;       ///< SOE_i Signal

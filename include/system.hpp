@@ -51,7 +51,7 @@ private:
     // -----------------------------------------------------------------------
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
     TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial8, pins 34/35)
-    MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871 + Encoder, Closed-Loop)
+    MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871, Open-Loop + Encoder als Sensor)
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial8 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
 
@@ -64,6 +64,14 @@ private:
 
     uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten Telemetrie-Downlinks
     uint32_t last_sys_telemetry_ms_ = 0;    ///< Zeitstempel des letzten SYS/STATE-Downlinks
+
+    // -----------------------------------------------------------------------
+    // Laufzeitbegrenzung des Motors
+    // -----------------------------------------------------------------------
+    // Der Motor laeuft Open-Loop und stoppt nicht mehr von selbst. Diese Grenze
+    // ist die Rueckfallebene, falls MOTOR_OFF nicht durchkommt. 0 = aus.
+    static constexpr uint32_t MOTOR_ON_TIMEOUT_MS = 30000;
+    uint32_t motor_on_since_ms_ = 0;        ///< Zeitpunkt des letzten MOTOR_ON
 
     // Kein Subsystem-Fehler ist fatal: der OBC laeuft degradiert weiter, statt
     // z.B. wegen eines fehlenden Motors auch die Telemetrie abzuschalten.
@@ -82,6 +90,7 @@ private:
     void onStateChanged(MissionState previous, MissionState current);
     void handleUplink(uint32_t now_ms);
     bool handleMotorCommand(const UplinkCommand& cmd);
+    void handleMotorTimeout(uint32_t now_ms);
     uint8_t subsystemBits() const;
 };
 

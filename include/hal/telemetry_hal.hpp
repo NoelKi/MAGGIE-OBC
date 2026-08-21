@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <Arduino.h>
 #include "hal/imu_hal.hpp"
+#include "hal/force_hal.hpp"
 
 /**
  * @file telemetry_hal.hpp
@@ -10,7 +11,7 @@
  *
  * Sends telemetry over a hardware UART using the fixed 20-byte MAGGIE
  * downlink frame. On the Teensy 4.1 the downlink is wired to pins
- * 34 (RX) / 35 (TX) -> Serial8.
+ * 16 (RX, updownlink+) / 17 (TX, updownlink-) -> Serial4.
  *
  * ---------------------------------------------------------------------------
  * Downlink frame (20 bytes, fixed size)
@@ -36,11 +37,32 @@
  *   IMU/GYRO :   [gx_hi gx_lo gy_hi gy_lo gz_hi gz_lo  0 0]  (int16 sensor counts)
  *   MOTOR/STATE: [pos(int32 BE) speed(int16 BE) state(uint8) 0]  (Encoder-Counts, PWM, Bits)
  *   SYS/STATE:   [state(uint8) subsys(uint8) uptime_ms(uint32 BE) 0 0]
+ *   FORCE/TARGET1: [c0 c1 c2 0]      (3x int16: X, Y, Z)
+ *   FORCE/TARGET2: [c0 c1 c2 c3]     (4x int16: A, B, C, D)
+ *                  je int16 = TARIERTE HX711-Counts / FORCE_TELE_DIV
+ *                  Flags beider Typen in STATUS2 (siehe DL_FORCE_*)
  *
  * The int16 values are the native BMI088 counts. The ground station applies
  * the documented scale factors:
  *   accel [m/s^2] = count * (9.80665 / 10920)   (+/-3 g range)
  *   gyro  [deg/s] = count * (1 / 65.536)         (+/-500 deg/s range)
+ *
+ * FORCE folgt demselben Muster: Der OBC schickt Counts, den Kalibrierfaktor
+ * (Counts -> Newton) legt die Bodenstation an. Er ist am Boden aenderbar,
+ * ohne die Firmware neu zu flashen - beim HX711 ist das der Wert, den man im
+ * Labor als letztes festzurrt. Der Nullpunkt muss dagegen hier oben abgezogen
+ * werden: Der Rohoffset des Wandlers liegt bei zehntausenden Counts und
+ * spraengte das int16 sofort (siehe FORCE_TELE_DIV in force_hal.hpp).
+ *
+ * Bei TARGET2 gilt das doppelt: Dort sind die vier Kanaele Rohzellen eines
+ * Eigenbaus, aus denen die Bodenstation per 3x4-Matrix erst einen Kraftvektor
+ * rechnet. Waehlt man die Matrix falsch, laesst sich das aus den in InfluxDB
+ * liegenden Rohkanaelen jederzeit neu auswerten - haette der OBC bereits
+ * X/Y/Z gefunkt, waere die Messung verloren.
+ *
+ * WARUM DIE FLAGS IN STATUS2 STEHEN: TARGET2 braucht alle acht DATA-Bytes fuer
+ * die vier int16. Damit beide FORCE-Typen dasselbe Format haben, liegen die
+ * Flags auch bei TARGET1 in STATUS2 statt im DATA-Feld.
  */
 
 /**
@@ -65,8 +87,8 @@
  * einen Dauer-Break zwingen, ohne saubere Flanke vor dem Paket.
  *
  * Die OBC-Platine selbst ist laut Schaltplan (U9, MAX3488xSA) richtig
- * beschaltet: A = TC+ from SM, B = TC- from SM, RO -> updownlink+ (Pin 34 RX),
- * DI -> updownlink- (Pin 35 TX). Die Vertauschung liegt also NICHT hier,
+ * beschaltet: A = TC+ from SM, B = TC- from SM, RO -> updownlink+ (Pin 16 RX),
+ * DI -> updownlink- (Pin 17 TX). Die Vertauschung liegt also NICHT hier,
  * sondern im Kabel zum Service-/Testmodul.
  *
  * STOLPERSTELLE am DSUB-15 des Service Module (REXUS User Manual): die
@@ -95,6 +117,7 @@ enum class DownlinkSubsystem : uint8_t {
     IMU   = 0x01,
     MOTOR = 0x02,
     SYS   = 0x03,
+    FORCE = 0x04,
 };
 
 // MSGID2 - message type for the IMU subsystem
@@ -106,6 +129,12 @@ enum class DownlinkImuMsg : uint8_t {
 // MSGID2 - message type for the MOTOR subsystem
 enum class DownlinkMotorMsg : uint8_t {
     STATE = 0x01,
+};
+
+// MSGID2 - message type for the FORCE subsystem
+enum class DownlinkForceMsg : uint8_t {
+    TARGET1 = 0x01,   ///< 3 Zellen X/Y/Z
+    TARGET2 = 0x02,   ///< 4 Zellen A/B/C/D (Eigenbau, 3x 120 Grad + Z)
 };
 
 // MSGID2 - message type for the SYS subsystem
@@ -127,18 +156,38 @@ static constexpr uint8_t DL_MOTOR_STATE_ENCODER_OK  = 0x02;  ///< bit1: Encoder 
 static constexpr uint8_t DL_MOTOR_STATE_TURNING     = 0x04;  ///< bit2: turnBy()-Drehung laeuft
 static constexpr uint8_t DL_MOTOR_STATE_TURN_FAILED = 0x08;  ///< bit3: letzte Drehung abgebrochen
 
+// FORCE/TARGET1 + FORCE/TARGET2 - flags, uebertragen in STATUS2
+//
+// Ein Bit pro Kanal, in derselben Reihenfolge wie im DATA-Feld:
+//   TARGET1 -> bit0 = X, bit1 = Y, bit2 = Z   (bit3 ungenutzt)
+//   TARGET2 -> bit0 = A, bit1 = B, bit2 = C, bit3 = D
+//
+// Die SAT-Bits sind kein Schoenheitsfehler, sondern der Unterschied zwischen
+// "die Kraft war so gross" und "der Downlink konnte nicht mehr": Ein
+// abgeschnittener Wert sieht in der Kurve aus wie ein Plateau. Bei TARGET2
+// wiegt das schwerer als bei TARGET1 - dort geht jede Zelle in die Berechnung
+// von X und Y ein, eine still begrenzte verdreht also den gesamten Vektor.
+static constexpr uint8_t DL_FORCE_SAT_0 = 0x01;  ///< bit0: Kanal 0 begrenzt
+static constexpr uint8_t DL_FORCE_SAT_1 = 0x02;  ///< bit1: Kanal 1 begrenzt
+static constexpr uint8_t DL_FORCE_SAT_2 = 0x04;  ///< bit2: Kanal 2 begrenzt
+static constexpr uint8_t DL_FORCE_SAT_3 = 0x08;  ///< bit3: Kanal 3 begrenzt
+static constexpr uint8_t DL_FORCE_TARED = 0x10;  ///< bit4: Nullabgleich gueltig
+static constexpr uint8_t DL_FORCE_STALE = 0x20;  ///< bit5: seit FORCE_STALE_MS keine neue Wandlung
+
 // SYS/STATE - subsystem byte bit definitions (DATA[1])
-// Bit 3 und 4 waren frueher Wiegesensor/Kraftsensor 2 und bleiben reserviert,
-// damit spaetere Sensoren ihre alten Bitpositionen zurueckbekommen koennen.
+// Bit 4 war frueher Kraftsensor 2 (Target 2) und bleibt reserviert, damit er
+// seine alte Bitposition zurueckbekommt.
 static constexpr uint8_t DL_SUBSYS_IMU      = 0x01;  ///< bit0: IMU initialisiert
 static constexpr uint8_t DL_SUBSYS_MOTOR    = 0x02;  ///< bit1: Motor + Encoder initialisiert
 static constexpr uint8_t DL_SUBSYS_DOWNLINK = 0x04;  ///< bit2: Downlink-UART offen
+static constexpr uint8_t DL_SUBSYS_FORCE1   = 0x08;  ///< bit3: Kraftsensor 1 initialisiert
+static constexpr uint8_t DL_SUBSYS_FORCE2   = 0x10;  ///< bit4: Kraftsensor 2 initialisiert
 
 class TelemetryDownlink {
 public:
     /**
      * @brief Constructor
-     * @param serial Hardware serial port used for the downlink (e.g. Serial8)
+     * @param serial Hardware serial port used for the downlink (e.g. Serial4)
      */
     explicit TelemetryDownlink(HardwareSerial& serial);
 
@@ -171,6 +220,22 @@ public:
      */
     void sendMotor(int32_t position, int16_t speed, uint8_t state,
                    uint8_t status1 = 0, uint8_t status2 = 0);
+
+    /**
+     * @brief Send one FORCE frame (Kraftsensor 1 oder 2).
+     *
+     * Die belegten Kanaele stehen in reading.count; nicht belegte DATA-Bytes
+     * bleiben 0. Die Flags gehen in STATUS2, weil TARGET2 alle acht DATA-Bytes
+     * fuer seine vier Zellen braucht.
+     *
+     * @param msg     TARGET1 (3 Kanaele) oder TARGET2 (4 Kanaele)
+     * @param reading Letzter Messwert von ForceHAL::read()
+     * @param stale   true, wenn seit FORCE_STALE_MS keine neue Wandlung kam
+     * @param tared   true, wenn der Nullabgleich gueltig ist
+     * @param status1 STATUS1 byte (see DL_STATUS1_* flags)
+     */
+    void sendForce(DownlinkForceMsg msg, const ForceReading& reading,
+                   bool stale, bool tared, uint8_t status1 = 0);
 
     /**
      * @brief Send the current mission state as one SYS/STATE frame.

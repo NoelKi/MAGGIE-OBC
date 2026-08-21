@@ -9,7 +9,7 @@
  * @brief MAGGIE Uplink Telecommand (UART, Empfang)
  *
  * Empfängt Telecommands über die RX-Hälfte des Downlink-UART
- * (Teensy 4.1: Serial8, Pin 34 RX). Der Server verpackt das Kommando als
+ * (Teensy 4.1: Serial4, Pin 16 RX). Der Server verpackt das Kommando als
  * SDC-Nutzlast in ein RXSM-Telecommand; das RXSM (Test-/Service-Modul) reicht
  * NUR die Nutzbytes über die UART an den OBC weiter. Der OBC muss das
  * 24-Byte-RXSM-Format daher nicht kennen - er parst nur das kompakte 6-Byte-
@@ -40,6 +40,7 @@ static constexpr uint8_t UPLINK_FRAME_SIZE = 6;
  *
  * 0x0x = Motor/HDRM (nur im TEST-Zustand ausgeführt, siehe StateMachine)
  * 0x1x = System/Zustandsmaschine
+ * 0x2x = Sensoren
  */
 enum class UplinkOpcode : uint8_t {
     MOTOR_OFF       = 0x00,   ///< Motor ausschalten
@@ -57,6 +58,10 @@ enum class UplinkOpcode : uint8_t {
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH
     ABORT           = 0x1F,   ///< Abbruch: Aktoren stoppen -> ABORT
+
+    /// Kraftsensor nullen (Zellen muessen frei sein).
+    /// ARG: 0 = beide, 1 = Kraftsensor 1, 2 = Kraftsensor 2.
+    FORCE_TARE      = 0x20,
 };
 
 struct UplinkCommand {
@@ -70,7 +75,7 @@ public:
     /**
      * @brief Constructor
      * @param serial Hardware serial port des Uplinks (gemeinsam mit dem
-     *               Downlink, z.B. Serial8). serial.begin() wird NICHT
+     *               Downlink, z.B. Serial4). serial.begin() wird NICHT
      *               aufgerufen - der Downlink hat den Port bereits geöffnet.
      */
     explicit UplinkReceiver(HardwareSerial& serial);

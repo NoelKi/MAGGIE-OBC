@@ -6,7 +6,7 @@ TelemetryDownlink::TelemetryDownlink(HardwareSerial& serial)
 }
 
 bool TelemetryDownlink::init(uint32_t baudrate) {
-    // On the Teensy 4.1 Serial8 already maps to pins 34 (RX) / 35 (TX),
+    // On the Teensy 4.1 Serial4 already maps to pins 16 (RX) / 17 (TX),
     // so no explicit pin assignment is needed.
     //
     // RXINV dreht NUR die Empfangsleitung in Hardware um (LPUART-Register),
@@ -114,6 +114,30 @@ void TelemetryDownlink::sendImu(const IMUReading& reading,
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::IMU),
               static_cast<uint8_t>(DownlinkImuMsg::GYRO),
               0, data, status1, status2);
+}
+
+void TelemetryDownlink::sendForce(DownlinkForceMsg msg, const ForceReading& reading,
+                                  bool stale, bool tared, uint8_t status1) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: bis zu 4x int16 BE in Kanalreihenfolge. Nicht belegte Kanaele
+    // bleiben 0 - TARGET1 nutzt drei, TARGET2 alle vier.
+    uint8_t flags = 0;
+    const uint8_t n = reading.count < FORCE_MAX_CHANNELS
+                    ? reading.count : FORCE_MAX_CHANNELS;
+    for (uint8_t i = 0; i < n; i++) {
+        put_be16(&data[i * 2], reading.tele[i]);
+        if (reading.sat[i]) flags |= static_cast<uint8_t>(DL_FORCE_SAT_0 << i);
+    }
+
+    if (tared) flags |= DL_FORCE_TARED;
+    if (stale) flags |= DL_FORCE_STALE;
+
+    // Flags als STATUS2 - DATA ist bei TARGET2 vollstaendig belegt.
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::FORCE),
+              static_cast<uint8_t>(msg),
+              0, data, status1, flags);
 }
 
 void TelemetryDownlink::sendMotor(int32_t position, int16_t speed, uint8_t state,

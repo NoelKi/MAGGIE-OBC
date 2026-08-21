@@ -8,7 +8,7 @@
 // ===========================================================================
 #define TELEMETRY_INTERVAL_MS 50        ///< Send IMU/Motor downlink every 50ms (20 Hz)
 #define SYS_TELEMETRY_INTERVAL_MS 1000  ///< Send SYS/STATE downlink every 1s (1 Hz)
-#define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial8, pins 34/35)
+#define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial4, pins 16/17)
 
 System::System() {
     // Konstruktor
@@ -18,6 +18,8 @@ System::~System() {
     delete imu_;
     delete downlink_;
     delete motor_;
+    delete force1_;
+    delete force2_;
     delete uplink_;
     delete rexus_;
 }
@@ -41,10 +43,11 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
-    // Telemetrie-Downlink (Serial8, Pins 34 RX / 35 TX)
+    // Telemetrie-Downlink (Serial4, Pin 16 RX = updownlink+ / 17 TX = updownlink-)
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial8, Pin 34/35)...");
-    downlink_ = new TelemetryDownlink(Serial8);
+    Serial.printf("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial4, Pin %u/%u)...\n",
+                  PIN_UPDOWNLINK_PLUS, PIN_UPDOWNLINK_MINUS);
+    downlink_ = new TelemetryDownlink(Serial4);
     downlink_ready_ = downlink_->init(DOWNLINK_BAUDRATE);
     if (downlink_ready_) {
         Serial.println("INFO  [System]: Downlink bereit (38400 Baud).");
@@ -69,9 +72,28 @@ bool System::init() {
     }
 
     // -----------------------------------------------------------------------
-    // Uplink-Telecommand-Empfang (teilt sich Serial8 mit dem Downlink, Pin 34 RX)
+    // Kraftsensoren (je eine HX711-Gruppe an gemeinsamem Takt)
+    //   Sensor 1: 3 Zellen X/Y/Z
+    //   Sensor 2: 4 Zellen A/B/C/D (Eigenbau, Verrechnung erst am Boden)
+    //
+    // Der Nullabgleich laeuft in init() mit - die Zellen muessen dabei
+    // UNBELASTET sein. Schlaegt er fehl, laeuft der Sensor ohne Tara weiter
+    // und meldet das per DL_FORCE_TARED an die Bodenstation.
     // -----------------------------------------------------------------------
-    uplink_ = new UplinkReceiver(Serial8);
+    Serial.println("INFO  [System]: Initialisiere Kraftsensor 1 (3x HX711, X/Y/Z)...");
+    force1_ = new ForceHAL(PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK);
+    force1_ready_ = force1_->init();
+    logForceSensor(force1_, "Kraftsensor 1", PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK);
+
+    Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (4x HX711, A/B/C/D)...");
+    force2_ = new ForceHAL(PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK);
+    force2_ready_ = force2_->init();
+    logForceSensor(force2_, "Kraftsensor 2", PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK);
+
+    // -----------------------------------------------------------------------
+    // Uplink-Telecommand-Empfang (teilt sich Serial4 mit dem Downlink, Pin 16 RX)
+    // -----------------------------------------------------------------------
+    uplink_ = new UplinkReceiver(Serial4);
 
     // -----------------------------------------------------------------------
     // REXUS-Signale (L0 / SOE / SODS). Sie loesen in diesem Ausbau KEINE
@@ -117,6 +139,9 @@ void System::run() {
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
     if (motor_) motor_->update();
+
+    // Kraftsensor jeden Loop pollen und im Takt der Wandlung senden (10 Hz)
+    handleForce();
 
     // Laufzeitbegrenzung des Motors prüfen
     handleMotorTimeout(now);
@@ -168,11 +193,99 @@ void System::handleMotorTelemetry() {
     downlink_->sendMotor(position, speed, state, status1, 0);
 }
 
+void System::logForceSensor(ForceHAL* hal, const char* label,
+                            const uint8_t* pins, uint8_t count, uint8_t sck) {
+    if (!hal) return;
+
+    if (!hal->tared()) {
+        Serial.printf("WARN  [System]: %s antwortet nicht - kein Nullabgleich. "
+                      "Verkabelung der Datenpins und der Taktleitung %u pruefen.\n",
+                      label, sck);
+        return;
+    }
+
+    // Die Nullpunkte gehoeren ins Protokoll: Sie sind der Bezug jeder spaeteren
+    // Messung, und ein voellig abweichender Wert zwischen zwei Starts ist der
+    // erste Hinweis auf eine belastete Zelle beim Booten.
+    Serial.printf("INFO  [System]: %s bereit (Takt %u), Nullpunkte:", label, sck);
+    for (uint8_t i = 0; i < count; i++) {
+        Serial.printf(" Pin%u=%ld", pins[i], static_cast<long>(hal->offset(i)));
+    }
+    Serial.println();
+}
+
+void System::handleForce() {
+    handleForceSensor(force1_, force1_ready_, DownlinkForceMsg::TARGET1, force1_state_);
+    handleForceSensor(force2_, force2_ready_, DownlinkForceMsg::TARGET2, force2_state_);
+}
+
+void System::handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
+                               ForceChannelState& state) {
+    if (!ready || !hal) return;
+
+    // read() kehrt ohne neue Wandlung sofort zurueck - der Aufruf jeden Loop
+    // kostet also nur ein digitalRead() je Kanal. Kommt ein Wert, geht er
+    // direkt raus: Der Downlink laeuft damit im Takt des Sensors (10 Hz) statt
+    // in einem festen Intervall, das gegen die Wandlung schwebt und Werte
+    // doppelt oder gar nicht sendet.
+    const bool fresh = hal->read(state.last);
+    const uint32_t now = millis();
+
+    if (!fresh) {
+        // Kein neuer Messwert. Solange der Sensor normal wandelt, ist das der
+        // Regelfall zwischen zwei Samples - nichts zu tun.
+        if (!hal->stalled()) return;
+
+        // Sensor haengt (oder hat noch nie geantwortet). Trotzdem senden, mit
+        // gesetztem STALE-Flag: Bliebe der Downlink hier still, saehe das am
+        // Boden aus wie "Sensor okay, Kraft konstant" - waehrend das
+        // Subsystembit im SYS-Frame weiter OK meldet. Ein Frame mit STALE sagt
+        // dagegen genau, was los ist.
+        //
+        // Gedrosselt auf FORCE_STALE_TX_INTERVAL_MS: Ohne diese Bremse ginge
+        // bei stehendem Wandler in JEDEM Loop ein Frame raus - das waere der
+        // sicherste Weg, den 38400-Baud-Downlink dichtzumachen.
+        if (now - state.last_tx_ms < FORCE_STALE_TX_INTERVAL_MS) return;
+    }
+
+    if (!downlink_ready_ || !downlink_) return;
+    state.last_tx_ms = now;
+
+    uint8_t status1 = 0;
+    if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
+
+    downlink_->sendForce(msg, state.last, hal->stalled(), hal->tared(), status1);
+}
+
+void System::tareForceSensor(ForceHAL* hal, bool ready, const char* label) {
+    if (!ready || !hal) {
+        Serial.printf("WARN  [System]: FORCE_TARE fuer %s - Sensor nicht da, ignoriert.\n",
+                      label);
+        return;
+    }
+
+    Serial.printf("INFO  [System]: TC FORCE_TARE - %s nullen "
+                  "(Zellen muessen unbelastet sein)\n", label);
+    if (!hal->tare()) {
+        Serial.printf("WARN  [System]: FORCE_TARE fuer %s fehlgeschlagen - "
+                      "Wandler antwortet nicht, alter Nullpunkt bleibt.\n", label);
+        return;
+    }
+
+    Serial.printf("INFO  [System]: %s Nullpunkte:", label);
+    for (uint8_t i = 0; i < hal->channels(); i++) {
+        Serial.printf(" [%u]=%ld", i, static_cast<long>(hal->offset(i)));
+    }
+    Serial.println();
+}
+
 uint8_t System::subsystemBits() const {
     uint8_t bits = 0;
     if (imu_ready_)      bits |= DL_SUBSYS_IMU;
     if (motor_ready_)    bits |= DL_SUBSYS_MOTOR;
     if (downlink_ready_) bits |= DL_SUBSYS_DOWNLINK;
+    if (force1_ready_)   bits |= DL_SUBSYS_FORCE1;
+    if (force2_ready_)   bits |= DL_SUBSYS_FORCE2;
     return bits;
 }
 
@@ -255,6 +368,27 @@ void System::handleUplink(uint32_t now_ms) {
             case UplinkOpcode::ABORT:
                 Serial.println("WARN  [System]: ABORT per Telecommand empfangen.");
                 abort_requested_ = true;
+                continue;
+
+            case UplinkOpcode::FORCE_TARE:
+                // Nullen ist ein reiner SENSOR-Eingriff, kein Aktor - deshalb
+                // ausserhalb der TEST-Sperre. Es bewegt nichts und laesst sich
+                // durch ein erneutes Tarieren jederzeit korrigieren.
+                //
+                // ARG waehlt den Sensor: 0 = beide, 1 = Sensor 1, 2 = Sensor 2.
+                // Beide dauern zusammen bis zu 2x TARE_TIMEOUT_MS - das ist
+                // hier vertretbar, weil in dieser Zeit nichts faehrt.
+                if (cmd.arg == 0 || cmd.arg == 1) {
+                    tareForceSensor(force1_, force1_ready_, "Kraftsensor 1");
+                }
+                if (cmd.arg == 0 || cmd.arg == 2) {
+                    tareForceSensor(force2_, force2_ready_, "Kraftsensor 2");
+                }
+                if (cmd.arg < 0 || cmd.arg > 2) {
+                    Serial.printf("WARN  [System]: FORCE_TARE mit ungueltigem ARG %d "
+                                  "(0=beide, 1=Sensor 1, 2=Sensor 2) - ignoriert.\n",
+                                  cmd.arg);
+                }
                 continue;
 
             case UplinkOpcode::MOTOR_OFF:

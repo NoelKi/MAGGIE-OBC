@@ -3,6 +3,7 @@
 #include "hal/imu_hal.hpp"
 #include "hal/telemetry_hal.hpp"
 #include "hal/motor_hal.hpp"
+#include "hal/force_hal.hpp"
 #include "hal/uplink_hal.hpp"
 #include "hal/rexus_hal.hpp"
 #include "statemachine/state_machine.hpp"
@@ -17,10 +18,12 @@
  *
  *   IMU (BMI088)        - Telemetrie in beiden Zustaenden
  *   Motor 1 + Encoder   - HDRM-Antrieb, per Telecommand nur im TEST-Zustand
- *   Down-/Uplink        - Serial8 (Pin 34/35) zum REXUS-Servicemodul
+ *   Kraftsensor 1       - 3x HX711 (X/Y/Z), Telemetrie in beiden Zustaenden
+ *   Kraftsensor 2       - 4x HX711 (A/B/C/D), Verrechnung erst am Boden
+ *   Down-/Uplink        - Serial4 (Pin 16/17) zum REXUS-Servicemodul
  *   REXUS-Signale       - werden eingelesen und als Rohpegel heruntergefunkt
  *
- * Weitere Komponenten (Kameras, Wiegezelle, Kraftsensoren, Roboterarm) kommen
+ * Weitere Komponenten (Kameras, Kraftsensor 2, Temperatur, Roboterarm) kommen
  * Stueck fuer Stueck dazu, sobald sie am Aufbau haengen und getestet werden.
  */
 
@@ -50,9 +53,11 @@ private:
     // Subsysteme
     // -----------------------------------------------------------------------
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
-    TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial8, pins 34/35)
+    TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial4, pins 16/17)
     MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871, Open-Loop + Encoder als Sensor)
-    UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial8 RX)
+    ForceHAL* force1_ = nullptr;                        ///< Kraftsensor 1 (3x HX711, gemeinsamer Takt)
+    ForceHAL* force2_ = nullptr;                        ///< Kraftsensor 2 (4x HX711, gemeinsamer Takt)
+    UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
 
     // -----------------------------------------------------------------------
@@ -81,10 +86,45 @@ private:
     bool downlink_ready_ = false;           ///< Downlink-UART bereit
     bool motor_ready_ = false;              ///< Motor (inkl. Encoder) initialisiert
     bool rexus_ready_ = false;              ///< REXUS-Signalpins konfiguriert
+    bool force1_ready_ = false;             ///< Kraftsensor 1 initialisiert
+    bool force2_ready_ = false;             ///< Kraftsensor 2 initialisiert
+
+    // -----------------------------------------------------------------------
+    // Kraftsensoren
+    // -----------------------------------------------------------------------
+    // Der HX711 wandelt mit 10 Hz. Gepollt wird trotzdem jeden Loop (read()
+    // kehrt ohne neuen Messwert sofort zurueck) - so geht kein Sample verloren
+    // und der Downlink laeuft automatisch im Takt des Sensors statt in einem
+    // festen Intervall, das gegen die Wandlung schwebt.
+    //
+    // Jeder Sensor fuehrt seinen eigenen Zustand: Die beiden Gruppen haengen an
+    // getrennten Taktleitungen und wandeln unabhaengig voneinander.
+    struct ForceChannelState {
+        ForceReading last{};                ///< letzter gelesener Messwert (0 vor dem ersten)
+        uint32_t last_tx_ms = 0;            ///< Zeitstempel des letzten FORCE-Frames
+    };
+    ForceChannelState force1_state_;
+    ForceChannelState force2_state_;
+
+    /// Sendeintervall, solange ein Sensor haengt. Ohne diese Bremse ginge bei
+    /// stehendem Wandler in JEDEM Loop ein Frame raus (siehe handleForceSensor).
+    static constexpr uint32_t FORCE_STALE_TX_INTERVAL_MS = 1000;
 
     void printWelcomeBanner();
     void handleTelemetry();
     void handleMotorTelemetry();
+    void handleForce();
+
+    /// Einen Kraftsensor pollen und bei neuem Messwert (oder Haenger) senden.
+    void handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
+                           ForceChannelState& state);
+
+    /// Einen Kraftsensor tarieren und das Ergebnis am Terminal protokollieren.
+    void tareForceSensor(ForceHAL* hal, bool ready, const char* label);
+
+    /// Pins und Nullpunkte eines Kraftsensors ans USB-Terminal melden.
+    static void logForceSensor(ForceHAL* hal, const char* label,
+                               const uint8_t* pins, uint8_t count, uint8_t sck);
     void handleSystemTelemetry(uint32_t now_ms);
     void handleStateMachine(uint32_t now_ms);
     void onStateChanged(MissionState previous, MissionState current);

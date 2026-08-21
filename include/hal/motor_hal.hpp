@@ -22,11 +22,26 @@
 
 class MotorHAL {
 public:
-    /// Counts pro voller Umdrehung der Abtriebswelle, am Aufbau bestaetigt.
-    /// Deckt sich mit der Rechnung 12 CPR x 380:1 Getriebe = 4560.
-    /// Basis fuer die Winkelanzeige am Boden und fuer turnBy().
+    /// Counts pro voller Umdrehung der Abtriebswelle.
+    /// Hergeleitet aus der Bestueckung: Der 12-CPR-Encoder sitzt auf der
+    /// MOTORwelle, das Getriebe untersetzt 379.17:1 -> 12 x 379.17 = 4550.04.
+    /// Basis fuer die Winkelanzeige am Boden und fuer turnBy()/goTo().
     /// Gegenstueck: MAGGIE_SERVER/app/services/downlink_frame_parser.py.
-    static constexpr long COUNTS_PER_REV = 4600;
+    static constexpr long COUNTS_PER_REV = 4550;
+
+    /// Kleinster PWM-Betrag, mit dem der Motor ueberhaupt anlaeuft.
+    ///
+    /// Am Aufbau gemessen: Unter etwa 150 dreht er sich selbst OHNE Last nicht
+    /// mehr, er brummt nur. Das ist keine Kennlinienschwaeche, sondern
+    /// Haftreibung plus Getriebewiderstand - und unter Last wird die Schwelle
+    /// eher hoeher, nie niedriger. 220 haelt bewusst Abstand dazu.
+    ///
+    /// setSpeed() hebt jeden Fahrbefehl unterhalb dieses Betrags an. Ein zu
+    /// kleiner Wert wuerde sonst den schlimmsten Fall erzeugen: Strom fliesst,
+    /// der Motor steht, die H-Bruecke heizt - und bei einer Fahrt auf
+    /// Encoder-Ziel liefe zusaetzlich der Stillstands-Abbruch los.
+    /// 0 bleibt 0 (Stopp), das Vorzeichen bleibt erhalten.
+    static constexpr int16_t MIN_DRIVE_SPEED = 220;
 
     /**
      * @brief Constructor for Motor HAL
@@ -54,13 +69,30 @@ public:
     /**
      * @brief Set motor speed and direction
      * @param speed -255 (full reverse) to +255 (full forward), 0 = stop
+     *
+     * Betraege zwischen 1 und MIN_DRIVE_SPEED werden auf MIN_DRIVE_SPEED
+     * angehoben - darunter laeuft der Motor nicht an. 0 bleibt 0.
      */
     void setSpeed(int16_t speed);
 
     /**
-     * @brief Stop motor immediately
+     * @brief Stop motor immediately (Coast - der Motor laeuft frei aus)
      */
     void stop();
+
+    /**
+     * @brief Aktiv bremsen statt auslaufen lassen.
+     *
+     * Schaltet beide Kanaele HIGH. Laut DRV8871-Datenblatt (Table 1,
+     * H-Bridge Control) ist 1/1 "Brake; low-side slow decay" - die
+     * Motorklemmen werden kurzgeschlossen. 0/0 waere dagegen "Coast", also
+     * freier Auslauf; das ist die Hauptquelle des Ueberschwingens am Zielpunkt.
+     *
+     * Der Bremsimpuls endet nach BRAKE_MS automatisch (siehe update()), damit
+     * die H-Bruecke danach schlafen kann und sich die Mechanik von Hand
+     * bewegen laesst.
+     */
+    void brake();
 
     /**
      * @brief Get current motor speed
@@ -137,15 +169,41 @@ public:
     void turnBy(int16_t degrees);
 
     /**
-     * @brief Prueft, ob eine turnBy()-Drehung ihr Ziel erreicht hat.
-     * Muss zyklisch (jeden Loop) aufgerufen werden. Ohne laufende Drehung
-     * kehrt die Funktion sofort zurueck.
+     * @brief Faehrt auf einen ABSOLUTEN Winkel bezogen auf die Encoder-Null.
+     * @param degrees Zielwinkel; 0 ist die mit zeroPosition() gesetzte Nullage.
+     *
+     * Der Unterschied zu turnBy() ist der Grund, warum es beide gibt: turnBy()
+     * rechnet ab der aktuellen Position und erbt damit den Fehler jeder
+     * vorherigen Fahrt - bei wiederholtem Auf/Zu addiert sich der
+     * richtungsabhaengige Ueberschwinger auf und die Nullage wandert. goTo()
+     * bezieht sich immer auf denselben Nullpunkt, der Fehler bleibt dadurch
+     * beschraenkt statt zu akkumulieren.
+     *
+     * Liegt die Position bereits innerhalb von POS_DEADBAND um das Ziel,
+     * passiert nichts - sonst wuerde der Motor um den Zielpunkt pendeln.
      */
-    void updateTurn();
+    void goTo(int16_t degrees);
+
+    /**
+     * @brief Zyklische Pflege - muss jeden Loop aufgerufen werden.
+     *
+     * Schaltet eine laufende Fahrt am Ziel ab (siehe turnBy/goTo) und beendet
+     * den Bremsimpuls nach BRAKE_MS. Ohne laufende Fahrt und ohne Bremsung
+     * kehrt die Funktion sofort zurueck. Das ist KEIN Regler.
+     */
+    void update();
 
     bool isOn() const { return is_on_; }          ///< Dauer-An/Aus-Zustand (on()/off())
     bool isTurning() const { return turning_; }   ///< turnBy()-Drehung laeuft
     bool hasEncoder() const { return enc_ != nullptr; }
+
+    /**
+     * @brief Wurde die letzte Drehung abgebrochen, statt das Ziel zu erreichen?
+     *
+     * Wird bei jedem turnBy() zurueckgesetzt. Siehe TURN_STALL_MS - typische
+     * Ursachen sind ein nicht zaehlender oder verpolter Encoder.
+     */
+    bool turnFailed() const { return turn_failed_; }
 
 private:
     uint8_t pin_a_;
@@ -157,8 +215,22 @@ private:
     Encoder* enc_ = nullptr;   ///< Quadratur-Encoder (nullptr = keine Messung)
     bool is_on_  = false;      ///< logischer An/Aus-Zustand (on()/off())
 
-    bool turning_    = false;  ///< eine turnBy()-Drehung laeuft
-    long turn_target_ = 0;     ///< absolute Zielposition dieser Drehung in Counts
+    bool turning_     = false; ///< eine Fahrt auf ein Encoder-Ziel laeuft
+    long turn_start_  = 0;     ///< Position beim Start dieser Fahrt
+    long turn_target_ = 0;     ///< absolute Zielposition dieser Fahrt in Counts
+    bool turn_failed_ = false; ///< letzte Fahrt wurde abgebrochen
+
+    // Ueberwachung der laufenden Fahrt, siehe updateTurn().
+    uint32_t turn_ref_ms_  = 0;  ///< Beginn des aktuellen Fortschrittsfensters
+    long     turn_ref_pos_ = 0;  ///< Position zu Beginn dieses Fensters
+
+    bool     braking_        = false;  ///< Bremsimpuls laeuft
+    uint32_t brake_start_ms_ = 0;      ///< Beginn des Bremsimpulses
+
+    /// Gemeinsamer Start fuer turnBy() und goTo().
+    void startMove(long target, int16_t degrees, const char* kind);
+    void updateTurn();   ///< Fahrt am Ziel abschalten
+    void updateBrake();  ///< Bremsimpuls nach BRAKE_MS beenden
 
     // -----------------------------------------------------------------------
     // Software-PWM fuer Pins ohne Hardware-Timer
@@ -191,12 +263,46 @@ private:
     /** @brief Schreibt beide Kanaele - je nach Modus per analogWrite oder Soft-PWM. */
     void writeChannels(uint8_t duty_a, uint8_t duty_b);
 
-    /// Geschwindigkeit fuer on() ohne Argument. Muss ueber dem Losbrechmoment
-    /// liegen, sonst brummt der Motor nur.
-    static constexpr int16_t DEFAULT_ON_SPEED = 210;
+    /// Geschwindigkeit fuer on() ohne Argument.
+    static constexpr int16_t DEFAULT_ON_SPEED = MIN_DRIVE_SPEED;
 
-    /// Feste Geschwindigkeit fuer turnBy(). Bewusst NICHT vom PWM-Schieber der
-    /// Bodenstation abhaengig: Der Auslauf am Ziel haengt an der Drehzahl, mit
-    /// konstantem Wert ist der Restfehler von Drehung zu Drehung reproduzierbar.
-    static constexpr int16_t TURN_SPEED = DEFAULT_ON_SPEED;
+    /// Feste Geschwindigkeit fuer turnBy()/goTo(). Bewusst NICHT vom
+    /// PWM-Schieber der Bodenstation abhaengig: Der Nachlauf am Ziel haengt an
+    /// der Drehzahl, mit konstantem Wert ist er reproduzierbar.
+    ///
+    /// Nach unten ist hier kein Spielraum - MIN_DRIVE_SPEED ist die Grenze,
+    /// unter der der Motor gar nicht erst anlaeuft. Der Nachlauf laesst sich
+    /// also nicht ueber die Drehzahl verkleinern; dagegen arbeiten der
+    /// Bremsimpuls (siehe brake()) und POS_DEADBAND.
+    static constexpr int16_t TURN_SPEED = MIN_DRIVE_SPEED;
+
+    // -----------------------------------------------------------------------
+    // Abbruchkriterium fuer turnBy()
+    // -----------------------------------------------------------------------
+    // Ohne diese Grenze laeuft der Motor bis zum Laufzeit-Watchdog in System
+    // (30 s), sobald das Ziel unerreichbar ist - bei totem Encoder, verpolten
+    // Kanaelen oder blockierter Mechanik. Das sind dutzende Umdrehungen, bevor
+    // ueberhaupt auffaellt, dass etwas nicht stimmt.
+    static constexpr uint32_t TURN_STALL_MS    = 1000;  ///< Fenster ohne Fortschritt
+    static constexpr long     TURN_MIN_COUNTS  = 3;     ///< Fortschritt, der als Bewegung zaehlt
+
+    /// Dauer des Bremsimpulses am Ende einer Fahrt. Lang genug, damit der
+    /// Anker steht, kurz genug, dass die H-Bruecke danach wieder schlafen kann.
+    static constexpr uint32_t BRAKE_MS = 250;
+
+    /// Zielfenster fuer goTo().
+    ///
+    /// MUSS groesser sein als der Nachlauf nach dem Bremsen. Eine Fahrt endet
+    /// immer ein Stueck HINTER dem Ziel; ist das Fenster kleiner als dieser
+    /// Rest, sieht ein erneuter Befehl auf dieselbe Position eine Abweichung
+    /// und faehrt zurueck - beim naechsten Druck wieder vor. Der Motor pendelt
+    /// dann um den Zielpunkt, statt stehen zu bleiben.
+    ///
+    /// Einstellen: Nachlauf ablesen (die "Fahrt beendet"-Zeile nennt Position
+    /// und Ziel, die Differenz ist der Nachlauf) und rund das Anderthalbfache
+    /// davon eintragen. 200 Counts sind ~15.8 Grad bei 4550 Counts/Umdrehung -
+    /// bewusst grosszuegig, weil ein zu kleines Fenster schlimmer ist als ein
+    /// zu grosses: Die Genauigkeit der Endlage leidet nur um diesen Betrag,
+    /// waehrend Pendeln die Mechanik belastet.
+    static constexpr long POS_DEADBAND = 200;
 };

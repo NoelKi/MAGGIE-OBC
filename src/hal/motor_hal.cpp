@@ -107,22 +107,53 @@ void MotorHAL::setSpeed(int16_t speed) {
     if (speed > 255) speed = 255;
     if (speed < -255) speed = -255;
 
+    // Untergrenze: Darunter fliesst zwar Strom, der Motor laeuft aber nicht an
+    // (Haftreibung + Getriebe). Anheben statt fahren zu lassen - ein
+    // stehender Motor unter Strom heizt nur die Bruecke. 0 bleibt Stopp.
+    if (speed > 0 && speed <  MIN_DRIVE_SPEED) speed =  MIN_DRIVE_SPEED;
+    if (speed < 0 && speed > -MIN_DRIVE_SPEED) speed = -MIN_DRIVE_SPEED;
+
     current_speed_ = speed;
+    braking_ = false;          // ein neuer Fahrbefehl beendet die Bremsphase
 
     if (speed > 0) {
-        // Forward: Channel A active, Channel B off
+        // Forward: Channel A active, Channel B off (DRV8871 Table 1: 1/0)
         writeChannels(static_cast<uint8_t>(speed), 0);
     } else if (speed < 0) {
-        // Reverse: Channel B active, Channel A off
+        // Reverse: Channel B active, Channel A off (Table 1: 0/1)
         writeChannels(0, static_cast<uint8_t>(-speed));
     } else {
-        // Stop: Both channels off
+        // Coast: beide Kanaele LOW -> H-Bruecke hochohmig (Table 1: 0/0)
         writeChannels(0, 0);
     }
 }
 
 void MotorHAL::stop() {
     setSpeed(0);
+}
+
+void MotorHAL::brake() {
+    if (!initialized_) return;
+
+    // DRV8871 Table 1: IN1=1, IN2=1 -> "Brake; low-side slow decay". Die
+    // Motorklemmen werden kurzgeschlossen, der Anker bremst gegen sich selbst.
+    // Mit Coast (0/0) laeuft der Motor stattdessen frei aus - das war die
+    // Hauptquelle des Ueberschwingens am Ende einer Drehung.
+    writeChannels(255, 255);
+    current_speed_  = 0;
+    braking_        = true;
+    brake_start_ms_ = millis();
+}
+
+void MotorHAL::updateBrake() {
+    // Nur ein kurzer Bremsimpuls: Dauerhaft gebremst bliebe die H-Bruecke
+    // aktiv (kein Sleep) und die Mechanik liesse sich nicht von Hand bewegen.
+    // Nach BRAKE_MS zurueck auf Coast.
+    if (!braking_) return;
+    if (millis() - brake_start_ms_ < BRAKE_MS) return;
+
+    braking_ = false;
+    writeChannels(0, 0);
 }
 
 void MotorHAL::setPWMFrequency(uint32_t frequency) {
@@ -159,7 +190,7 @@ void MotorHAL::on(int16_t speed) {
 void MotorHAL::off() {
     turning_ = false;
     is_on_   = false;
-    setSpeed(0);
+    brake();
 }
 
 void MotorHAL::turnBy(int16_t degrees) {
@@ -171,12 +202,52 @@ void MotorHAL::turnBy(int16_t degrees) {
     const long delta = static_cast<long>(degrees) * COUNTS_PER_REV / 360;
     if (delta == 0) return;    // Winkel zu klein fuer einen ganzen Count
 
-    on(delta > 0 ? TURN_SPEED : -TURN_SPEED);   // setzt turning_ zurueck
-    turn_target_ = enc_->read() + delta;
-    turning_     = true;
+    startMove(enc_->read() + delta, degrees, "relativ");
+}
 
-    Serial.printf("INFO  [MotorHAL]: Drehung um %d Grad (%ld Counts) -> Ziel %ld.\n",
-                  degrees, delta, turn_target_);
+void MotorHAL::goTo(int16_t degrees) {
+    if (!enc_) return;
+
+    // ABSOLUT zur Encoder-Null. Der entscheidende Unterschied zu turnBy():
+    // Das Ziel haengt nicht davon ab, wo die letzte Fahrt geendet hat. Ein
+    // Ueberschwinger wird bei der naechsten Fahrt automatisch mit
+    // ausgeglichen, statt sich Zyklus fuer Zyklus aufzuaddieren - genau das
+    // laesst die Nullage bei relativen Fahrten wandern.
+    const long target = static_cast<long>(degrees) * COUNTS_PER_REV / 360;
+    const long pos    = enc_->read();
+
+    // Totband: Ohne das wuerde ein erneuter Befehl auf dieselbe Position den
+    // Motor um den Zielpunkt herum pendeln lassen - die Fahrt stoppt ja erst
+    // NACH dem Ueberschreiten des Ziels, steht also immer ein Stueck dahinter.
+    if (labs(target - pos) <= POS_DEADBAND) {
+        Serial.printf("INFO  [MotorHAL]: Position %ld schon im Zielfenster "
+                      "(%ld +/- %ld Counts) - keine Fahrt.\n",
+                      pos, target, POS_DEADBAND);
+        return;
+    }
+
+    startMove(target, degrees, "absolut");
+}
+
+void MotorHAL::startMove(long target, int16_t degrees, const char* kind) {
+    const long start = enc_->read();
+
+    on(target > start ? TURN_SPEED : -TURN_SPEED);   // setzt turning_ zurueck
+    turn_start_    = start;
+    turn_target_   = target;
+    turn_ref_pos_  = start;
+    turn_ref_ms_   = millis();
+    turn_failed_   = false;
+    turning_       = true;
+
+    Serial.printf("INFO  [MotorHAL]: Fahrt %s %d Grad - Start %ld, Ziel %ld "
+                  "(%ld Counts).\n",
+                  kind, degrees, turn_start_, turn_target_, target - start);
+}
+
+void MotorHAL::update() {
+    updateTurn();
+    updateBrake();
 }
 
 void MotorHAL::updateTurn() {
@@ -186,11 +257,43 @@ void MotorHAL::updateTurn() {
     // labs(pos - target) <= Toleranz wuerde bei zu grosser Schrittweite
     // zwischen zwei Loops uebersprungen und die Drehung liefe endlos weiter.
     const long pos     = enc_->read();
-    const bool reached = current_speed_ > 0 ? pos >= turn_target_
-                                            : pos <= turn_target_;
-    if (!reached) return;
+    const bool forward = current_speed_ > 0;
+    const bool reached = forward ? pos >= turn_target_ : pos <= turn_target_;
+
+    if (!reached) {
+        // Fortschritt IN Fahrtrichtung. Faengt beide Ausfaelle ab, bei denen das
+        // Ziel nie erreichbar ist und der Motor sonst bis zum Laufzeit-Watchdog
+        // durchliefe: Encoder zaehlt gar nicht (Kanal ab, falscher Pin) oder er
+        // zaehlt verkehrt herum (A/B vertauscht) - dann laeuft die Position vom
+        // Ziel weg.
+        const long progress = forward ? pos - turn_ref_pos_ : turn_ref_pos_ - pos;
+
+        if (progress >= TURN_MIN_COUNTS) {
+            turn_ref_pos_ = pos;             // Fortschritt -> Fenster neu aufziehen
+            turn_ref_ms_  = millis();
+        } else if (millis() - turn_ref_ms_ >= TURN_STALL_MS) {
+            off();
+            turn_failed_ = true;
+            Serial.printf(
+                "WARN  [MotorHAL]: Drehung abgebrochen - in %lu ms nur %ld Counts "
+                "in Fahrtrichtung. Position %ld (Start %ld, Ziel %ld, PWM %d).\n",
+                static_cast<unsigned long>(TURN_STALL_MS), progress,
+                pos, turn_start_, turn_target_, current_speed_);
+            Serial.println(
+                "WARN  [MotorHAL]: Position unveraendert -> Encoder zaehlt nicht "
+                "(Verdrahtung/Pins pruefen). Position laeuft weg -> Encoder-Kanaele "
+                "A/B vertauscht. Mechanik fest -> Motor blockiert.");
+        }
+        return;
+    }
 
     off();
-    Serial.printf("INFO  [MotorHAL]: Drehung beendet - Position %ld (Ziel %ld).\n",
-                  pos, turn_target_);
+    // Gedreht = tatsaechlich zurueckgelegte Counts. Weicht der Wert deutlich vom
+    // Sollbetrag ab, stimmt COUNTS_PER_REV nicht - genau der Vergleich, den man
+    // zum Kalibrieren braucht.
+    Serial.printf("INFO  [MotorHAL]: Drehung beendet - Position %ld (Ziel %ld, "
+                  "gedreht %ld Counts = %.1f Grad bei COUNTS_PER_REV=%ld).\n",
+                  pos, turn_target_, pos - turn_start_,
+                  static_cast<double>(pos - turn_start_) * 360.0 / COUNTS_PER_REV,
+                  COUNTS_PER_REV);
 }

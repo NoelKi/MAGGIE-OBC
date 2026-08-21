@@ -115,8 +115,8 @@ void System::run() {
     // Zustand fortschreiben (Telecommands)
     handleStateMachine(now);
 
-    // Laufende Winkeldrehung am Ziel abschalten
-    if (motor_) motor_->updateTurn();
+    // Fahrt am Ziel abschalten, Bremsimpuls beenden
+    if (motor_) motor_->update();
 
     // Laufzeitbegrenzung des Motors prüfen
     handleMotorTimeout(now);
@@ -160,6 +160,7 @@ void System::handleMotorTelemetry() {
     if (motor_->isOn())        state |= DL_MOTOR_STATE_ON;
     if (motor_->hasEncoder())  state |= DL_MOTOR_STATE_ENCODER_OK;
     if (motor_->isTurning())   state |= DL_MOTOR_STATE_TURNING;
+    if (motor_->turnFailed())  state |= DL_MOTOR_STATE_TURN_FAILED;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -297,17 +298,33 @@ bool System::handleMotorCommand(const UplinkCommand& cmd) {
         case UplinkOpcode::MOTOR_ON:
             Serial.printf("INFO  [System]: TC MOTOR_ON (speed=%d)\n", cmd.arg);
             motor_->on(cmd.arg);
+            // Sichtbar machen, wenn die Anlaufgrenze gegriffen hat - sonst
+            // wundert man sich am Boden ueber den abweichenden PWM-Istwert.
+            if (cmd.arg != 0 && motor_->getSpeed() != cmd.arg) {
+                Serial.printf("WARN  [System]: PWM %d unter der Anlaufgrenze "
+                              "(%d) - auf %d angehoben.\n",
+                              cmd.arg, MotorHAL::MIN_DRIVE_SPEED, motor_->getSpeed());
+            }
             motor_on_since_ms_ = millis();
             return true;
         case UplinkOpcode::MOTOR_TURN:
-            Serial.printf("INFO  [System]: TC MOTOR_TURN (%d Grad)\n", cmd.arg);
+            Serial.printf("INFO  [System]: TC MOTOR_TURN (%d Grad relativ)\n", cmd.arg);
             if (!motor_->hasEncoder()) {
                 Serial.println("WARN  [System]: MOTOR_TURN ohne Encoder - ignoriert.");
                 return true;
             }
             motor_->turnBy(cmd.arg);
             // Der Watchdog gilt auch hier: Bleibt der Encoder stehen (Mechanik
-            // fest, Kanal ab), erreicht updateTurn() sein Ziel nie.
+            // fest, Kanal ab), erreicht update() sein Ziel nie.
+            motor_on_since_ms_ = millis();
+            return true;
+        case UplinkOpcode::MOTOR_GOTO:
+            Serial.printf("INFO  [System]: TC MOTOR_GOTO (%d Grad absolut)\n", cmd.arg);
+            if (!motor_->hasEncoder()) {
+                Serial.println("WARN  [System]: MOTOR_GOTO ohne Encoder - ignoriert.");
+                return true;
+            }
+            motor_->goTo(cmd.arg);
             motor_on_since_ms_ = millis();
             return true;
         case UplinkOpcode::MOTOR_OFF:

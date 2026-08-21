@@ -87,12 +87,11 @@ Skalierung in der Bodenstation:
 ```
 accel [m/s²] = count · 9.80665 / 10920      (±3 g)
 gyro  [°/s]  = count · 1 / 65.536           (±500 °/s)
-Winkel [°]   = counts · 360 / 4600          (Encoder, COUNTS_PER_REV)
+Winkel [°]   = counts · 360 / 4550          (Encoder, COUNTS_PER_REV)
 ```
 
 `pos` in Encoder-Counts ist der direkt gemessene Wert. `angle_deg` und
-`revolutions` leitet der Server daraus über `COUNTS_PER_REV` ab — solange dieser
-Wert nicht nachgemessen ist (siehe §5), sind nur die Counts belastbar.
+`revolutions` leitet der Server daraus über `COUNTS_PER_REV = 4550` ab (siehe §5).
 
 **MOTOR/STATE `state`-Bits**
 
@@ -132,9 +131,10 @@ also rund ein Drittel der 38400 Baud.
 | Opcode | Name | Wirkung | Server-Endpunkt |
 |---:|---|---|---|
 | `0x00` | `MOTOR_OFF` | Motor aus | `POST /api/command/motor {"action":"off"}` |
-| `0x01` | `MOTOR_ON` | Motor dreht mit `ARG` als PWM, bis `MOTOR_OFF` kommt | `… {"action":"on","speed":120}` |
+| `0x01` | `MOTOR_ON` | Motor dreht mit `ARG` als PWM, bis `MOTOR_OFF` kommt | `… {"action":"on","speed":220}` |
 | `0x05` | `MOTOR_ZERO` | Encoder-Zähler auf 0 setzen (stoppt den Motor) | `… {"action":"zero"}` |
-| `0x06` | `MOTOR_TURN` | Drehung um `ARG` Grad, stoppt selbst am Encoder-Ziel | `… {"action":"turn","angle":180}` |
+| `0x06` | `MOTOR_TURN` | Drehung um `ARG` Grad **relativ**, stoppt am Encoder-Ziel | `… {"action":"turn","angle":180}` |
+| `0x07` | `MOTOR_GOTO` | Fahrt auf `ARG` Grad **absolut** zur Encoder-Null | `… {"action":"goto","angle":180}` |
 | `0x10` | `TEST_ENTER` | Bodentest betreten (nur aus `PRE_LAUNCH`) | `POST /api/command/test {"action":"enter"}` |
 | `0x11` | `TEST_EXIT` | Bodentest verlassen → `PRE_LAUNCH` | `… {"action":"exit"}` |
 | `0x1F` | `ABORT` | Missionsabbruch, Aktoren stoppen | `POST /api/command/abort` |
@@ -143,10 +143,22 @@ also rund ein Drittel der 38400 Baud.
 stillgelegt: Die Positionsregelung ist entfallen, der Encoder ist nur noch
 Sensor. Die Werte bleiben reserviert und dürfen nicht neu vergeben werden.
 
-**`MOTOR_ON`-Argument.** `ARG` ist der PWM-Stellwert `-255..+255`; das Vorzeichen
-gibt die Drehrichtung vor. `ARG = 0` überlässt dem OBC seine
-`DEFAULT_ON_SPEED` (120, vorwärts). Der Server weist Werte außerhalb des
-Bereichs mit HTTP 400 ab, statt sie zu klemmen.
+**`MOTOR_ON`-Argument.** `ARG` ist der PWM-Stellwert; das Vorzeichen gibt die
+Drehrichtung vor. `ARG = 0` überlässt dem OBC seine `DEFAULT_ON_SPEED`
+(vorwärts).
+
+**Untergrenze `MIN_DRIVE_SPEED = 220`.** Am Aufbau gemessen: Unter etwa 150
+läuft der Motor selbst **ohne Last** nicht an — Haftreibung plus
+Getriebewiderstand, unter Last liegt die Schwelle eher höher. 220 hält Abstand
+dazu. Gültig ist damit `0` (Default) oder ein Betrag von `220..255`.
+
+Die Grenze wird zweifach durchgesetzt: Der Server weist kleinere Beträge mit
+HTTP 400 ab, damit ein zu kleiner Wert auffällt statt still verändert zu werden;
+`MotorHAL::setSpeed()` hebt sie zusätzlich an, falls ein Kommando anders
+hereinkommt. Greift die Anhebung, meldet der OBC das auf der Debug-Konsole. Der
+schlimmste Fall wäre ein Wert dazwischen: Strom fließt, der Motor steht, die
+H-Brücke heizt — und bei einer Fahrt auf Encoder-Ziel liefe zusätzlich der
+Stillstands-Abbruch los.
 
 **`MOTOR_ON` stoppt nicht von selbst.** Beendet wird ein Dauerlauf durch
 `MOTOR_OFF`, durch `TEST_EXIT`/`ABORT` (der OBC stoppt die Aktoren beim
@@ -154,22 +166,51 @@ Verlassen von `TEST`) — oder durch den Laufzeit-Watchdog `MOTOR_ON_TIMEOUT_MS`
 in `system.hpp`, der den Motor nach 30 s abschaltet. Die Konstante auf `0` zu
 setzen deaktiviert den Watchdog.
 
-**`MOTOR_TURN`-Argument.** `ARG` ist der Drehwinkel in Grad, **relativ** zur
-aktuellen Position; das Vorzeichen gibt die Richtung vor. Der Server begrenzt
-auf ±3600° und weist `angle = 0` ab. Umgerechnet wird mit
-`COUNTS_PER_REV`: 180° = 2300 Counts.
+**`MOTOR_TURN` und `MOTOR_GOTO`.** `ARG` ist in beiden Fällen ein Winkel in
+Grad, umgerechnet über `COUNTS_PER_REV`. Der Unterschied ist der Bezugspunkt:
 
-Das ist **keine Regelung**. Der Motor läuft mit der festen `TURN_SPEED`
-(`motor_hal.hpp`, bewusst unabhängig vom PWM-Schieber der Bodenstation, damit
-der Auslauf reproduzierbar bleibt), und `updateTurn()` schaltet ihn ab, sobald
-der Encoder das Ziel in Fahrtrichtung überschritten hat — der Encoder wirkt als
-Endschalter. Es wird weder die Geschwindigkeit nachgeführt noch am Ziel
-nachkorrigiert: Der Auslauf bleibt als Restfehler stehen und ist in der
-Telemetrie sichtbar (typisch wenige Counts, da das 380:1-Getriebe selbst bremst).
+| | Bezug | Ziel |
+|---|---|---|
+| `MOTOR_TURN` | aktuelle Position | `Position + ARG` |
+| `MOTOR_GOTO` | Encoder-Null | `ARG` |
 
-Ohne Encoder verwirft der OBC `MOTOR_TURN`, statt ungebremst loszulaufen. Bleibt
-der Encoder während der Drehung stehen (Mechanik fest, Kanal ab), greift der
-Laufzeit-Watchdog.
+Der Server begrenzt beide auf ±3600°; `angle = 0` ist bei `goto` gültig (Fahrt
+auf die Nullage), bei `turn` nicht.
+
+**Für wiederholtes Auf/Zu ist `MOTOR_GOTO` zu nehmen.** Jede Fahrt endet ein
+Stück hinter dem Ziel, und dieser Nachlauf ist richtungsabhängig — Federkraft,
+Schwerkraft und Reibung wirken beim Öffnen anders als beim Schließen. Bei
+`MOTOR_TURN` erbt jede Fahrt die Endlage der vorherigen, die Differenz addiert
+sich also Zyklus für Zyklus auf und die Nullage wandert sichtbar davon. Bei
+`MOTOR_GOTO` bezieht sich jedes Ziel auf denselben Nullpunkt, wodurch der
+Fehler beschränkt bleibt statt zu wachsen.
+
+`MOTOR_GOTO` fährt nicht, wenn die Position bereits innerhalb von
+`POS_DEADBAND` (`motor_hal.hpp`) um das Ziel liegt. Das Fenster **muss größer
+sein als der Nachlauf** — sonst korrigiert ein erneuter Befehl den Nachlauf
+zurück, der nächste wieder vor, und der Motor pendelt um den Zielpunkt.
+
+Beides ist **keine Regelung**. Der Motor läuft mit der festen `TURN_SPEED`
+(bewusst unabhängig vom PWM-Schieber der Bodenstation, damit der Nachlauf
+reproduzierbar bleibt), und `update()` schaltet ihn ab, sobald der Encoder das
+Ziel in Fahrtrichtung überschritten hat — der Encoder wirkt als Endschalter.
+Es wird weder die Geschwindigkeit nachgeführt noch am Ziel nachkorrigiert.
+
+**Gebremst statt ausgelaufen.** Am Ende jeder Fahrt und bei `MOTOR_OFF` legt der
+OBC beide Brückenkanäle auf HIGH — laut DRV8871-Datenblatt (Table 1) „Brake;
+low-side slow decay". Vorher standen beide auf LOW, also „Coast": Der Motor lief
+frei aus, was den Nachlauf um ein Vielfaches vergrößerte. Der Bremsimpuls endet
+nach `BRAKE_MS`, danach geht die Brücke wieder auf Coast, damit sie schlafen
+kann und sich die Mechanik von Hand bewegen lässt.
+
+Ohne Encoder verwirft der OBC `MOTOR_TURN`/`MOTOR_GOTO`, statt ungebremst
+loszulaufen. Bleibt der Encoder während der Fahrt stehen (Mechanik fest, Kanal
+ab), greift `TURN_STALL_MS` nach einer Sekunde und setzt das Telemetriebit
+`0x08`; danach fängt der Laufzeit-Watchdog den Rest ab.
+
+Beide Fahrten laufen mit `TURN_SPEED = MIN_DRIVE_SPEED`. Nach unten ist dort
+kein Spielraum, der Nachlauf lässt sich also **nicht** über die Drehzahl
+verkleinern — dagegen arbeiten allein der Bremsimpuls und `POS_DEADBAND`.
 
 ---
 
@@ -203,9 +244,17 @@ Abweichung zur Platine: In `docs/teensyPins/MAGGIE-OCB-PIN-BELEGUNG.txt` liegt
 `M1_B` auf Pin 14, Pin 19 ist dort `CAMDIR1`. 18/19 ist die Verdrahtung des
 Tischaufbaus — vor dem Flug abgleichen.
 
-`COUNTS_PER_REV = 4600` ist am Aufbau bestätigt und deckt sich mit der Rechnung
-aus den Bauteilen: Der Magnet-Encoder sitzt auf der **Motorwelle**, also ist
-`Counts/Abtriebsumdrehung = Encoder-CPR × Getriebeübersetzung` = 12 × 380 = 4560.
+`COUNTS_PER_REV = 4550` ergibt sich direkt aus der Bestückung. Der Encoder
+(12 CPR, back connector) sitzt auf der **Motorwelle**, nicht auf der
+Abtriebswelle — also gilt
+`Counts/Abtriebsumdrehung = Encoder-CPR × Getriebeübersetzung`:
+
+```
+12 CPR × 379.17 = 4550.04  →  COUNTS_PER_REV = 4550
+```
+
+Die 379.17:1 sind die exakte Übersetzung des verbauten Getriebes, nicht die
+gerundete Typbezeichnung. Der Wert ist damit hergeleitet und nicht nur gemessen.
 
 Der Wert steht doppelt — in `include/hal/motor_hal.hpp` und in
 `MAGGIE_SERVER/app/services/downlink_frame_parser.py` — und muss an beiden

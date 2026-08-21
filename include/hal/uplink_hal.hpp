@@ -51,7 +51,8 @@ enum class UplinkOpcode : uint8_t {
     // moeglicherweise noch.
 
     MOTOR_ZERO      = 0x05,   ///< Encoder-Zaehler auf 0 setzen (stoppt den Motor)
-    MOTOR_TURN      = 0x06,   ///< Drehung um ARG Grad, stoppt am Ziel (ARG signed)
+    MOTOR_TURN      = 0x06,   ///< Drehung um ARG Grad RELATIV, stoppt am Ziel
+    MOTOR_GOTO      = 0x07,   ///< Fahrt auf ARG Grad ABSOLUT (bezogen auf die Encoder-Null)
 
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH

@@ -22,7 +22,7 @@ const int PWM_RES  = 8;      // 8 Bit -> Werte 0..255
 // WICHTIG: An deinen Encoder anpassen! Counts fuer EINE volle Umdrehung
 // (Getriebe eingerechnet). Kalibrieren: Motor genau 1x von Hand drehen und
 // den "Encoder = ..."-Wert im Monitor ablesen.
-const long COUNTS_PER_REV = 4600;                // gemessen: halbe Umdrehung ~2300
+const long COUNTS_PER_REV = 4550;                // gemessen: halbe Umdrehung ~2300
 const long HALF_TURN      = COUNTS_PER_REV / 2;  // 180 Grad = ~2300 Counts
 
 const float Kp        = 0.8f;  // Regler-Verstaerkung

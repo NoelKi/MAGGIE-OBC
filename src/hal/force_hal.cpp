@@ -1,7 +1,7 @@
 #include "hal/force_hal.hpp"
 
-ForceHAL::ForceHAL(const uint8_t* dout_pins, uint8_t count, uint8_t pin_sck)
-    : pin_sck_(pin_sck) {
+ForceHAL::ForceHAL(const uint8_t* dout_pins, uint8_t count, uint8_t pin_sck, int32_t tele_div)
+    : pin_sck_(pin_sck), tele_div_(tele_div) {
     if (count > FORCE_MAX_CHANNELS) count = FORCE_MAX_CHANNELS;
     count_ = count;
     for (uint8_t i = 0; i < count_; i++) dout_[i] = dout_pins[i];
@@ -46,8 +46,8 @@ int32_t ForceHAL::signExtend24(uint32_t value) {
     return static_cast<int32_t>(value);
 }
 
-int16_t ForceHAL::toTelemetry(int32_t counts, bool& saturated) {
-    const int32_t scaled = counts / FORCE_TELE_DIV;
+int16_t ForceHAL::toTelemetry(int32_t counts, int32_t tele_div, bool& saturated) {
+    const int32_t scaled = counts / tele_div;
     if (scaled > 32767) {
         saturated = true;
         return 32767;
@@ -101,7 +101,7 @@ bool ForceHAL::read(ForceReading& out) {
     for (uint8_t i = 0; i < count_; i++) {
         out.raw[i]    = raw[i];
         out.counts[i] = raw[i] - offset_[i];
-        out.tele[i]   = toTelemetry(out.counts[i], out.sat[i]);
+        out.tele[i]   = toTelemetry(out.counts[i], tele_div_, out.sat[i]);
     }
 
     out.timestamp = last_sample_ms_;

@@ -69,12 +69,33 @@ static constexpr uint32_t FORCE_SAMPLE_RATE_HZ = 10;
  * liegt also im int16-Fenster, und der grosse Nullpunkt-Offset des Wandlers
  * faellt vorher weg.
  *
- * Reicht der Bereich nicht (DL_FORCE_SAT_* wird gesetzt, die Bodenstation
- * zeigt "saturiert"), diesen Teiler auf 2 oder 4 erhoehen - und den
- * gleichnamigen Wert in MAGGIE_SERVER/app/services/downlink_frame_parser.py
- * mitziehen, sonst stimmt die Skalierung am Boden nicht mehr.
+ * JEDER Sensor hat seinen EIGENEN Teiler, weil die beiden Wandlergruppen
+ * unterschiedliche Wiegezellen an unterschiedlichem Takt sind und damit
+ * unterschiedlich viele Rohcounts pro Gramm liefern - ein gemeinsamer Teiler
+ * kann nicht fuer beide gleichzeitig passen.
+ *
+ * ERSTKALIBRIERUNG (Bodentest 2026-08-24, vertikale Belastung):
+ * Bei FORCE_TELE_DIV=1 saettigte Sensor 1 (X/Y/Z, 20 N = ca. 2039 g) schon
+ * bei ca. 10 g - der Wandler liefert also ca. 32767/10 ≈ 3277 Rohcounts pro
+ * Gramm. Um die vollen 2039 g mit Reserve abzubilden, braucht es einen
+ * Teiler von mindestens 2039/10 ≈ 204; gewaehlt: 256 (Vollausschlag ≈ 2560 g,
+ * ca. 25 % Reserve ueber der Nennlast).
+ *
+ * Sensor 2 (A/B/C/D, je Zelle 10 kg = 10000 g) wurde noch NICHT einzeln
+ * durchgemessen. Nimmt man an, dass die Zellen bei aehnlicher Bauart auf
+ * dieselbe Vollausschlags-Spannung (mV/V) ausgelegt sind, skalieren
+ * Rohcounts/Gramm umgekehrt proportional zur Nennlast - der noetige Teiler
+ * waere dann ungefaehr derselbe wie bei Sensor 1 (2039/10 ≈ 10000/49, beide
+ * ≈ Faktor 204). Deshalb vorerst derselbe Wert (256) als Startpunkt.
+ *
+ * NACHMESSEN: Saettigt Sensor 2 bei bekannter Last trotzdem (DL_FORCE_SAT_*
+ * im STATUS2, siehe unten), FORCE2_TELE_DIV verdoppeln, bis der Bereich
+ * passt. Beim Aendern beider Werte IMMER MAGGIE_SERVER/app/services/
+ * downlink_frame_parser.py (FORCE1_TELE_DIV / FORCE2_TELE_DIV) mitziehen -
+ * sonst stimmt die Skalierung (Counts -> Newton) am Boden nicht mehr.
  */
-static constexpr int32_t FORCE_TELE_DIV = 1;
+static constexpr int32_t FORCE1_TELE_DIV = 256;   ///< Kraftsensor 1 (X/Y/Z, 20 N)
+static constexpr int32_t FORCE2_TELE_DIV = 256;   ///< Kraftsensor 2 (A/B/C/D, 10 kg/Zelle) - Schaetzung, siehe oben
 
 /// Ab wann gilt der Sensor als haengend (keine neue Wandlung mehr)?
 /// Grosszuegig gegenueber den 100 ms der 10-Hz-Wandlung.
@@ -92,7 +113,7 @@ struct ForceReading {
     // bis auf den Kalibrierfaktor, den die Bodenstation anwendet.
     int32_t counts[FORCE_MAX_CHANNELS] = {};
 
-    // Tariert, durch FORCE_TELE_DIV geteilt und auf int16 begrenzt.
+    // Tariert, durch tele_div_ (FORCE1_/FORCE2_TELE_DIV) geteilt und auf int16 begrenzt.
     int16_t tele[FORCE_MAX_CHANNELS] = {};
 
     // Hat die Begrenzung gegriffen? Dann ist der Wert im Downlink abgeschnitten
@@ -118,12 +139,15 @@ public:
      * @param dout_pins Datenleitungen der Wandler, in Kanalreihenfolge
      * @param count     Anzahl Kanaele (1..FORCE_MAX_CHANNELS)
      * @param pin_sck   GEMEINSAME Taktleitung aller Wandler dieser Gruppe
+     * @param tele_div  Teiler tarierte Counts -> int16 (siehe FORCE1_TELE_DIV /
+     *                  FORCE2_TELE_DIV oben) - je Sensor unterschiedlich, weil
+     *                  die Wiegezellen unterschiedlich viele Counts/Gramm liefern.
      *
      * Die Reihenfolge in dout_pins IST die Kanalnummerierung im Downlink -
      * bei Sensor 2 also A, B, C, D. Wird sie vertauscht, dreht sich am Boden
      * der berechnete Kraftvektor mit.
      */
-    ForceHAL(const uint8_t* dout_pins, uint8_t count, uint8_t pin_sck);
+    ForceHAL(const uint8_t* dout_pins, uint8_t count, uint8_t pin_sck, int32_t tele_div);
 
     /**
      * @brief Pins konfigurieren und Nullabgleich fahren.
@@ -192,6 +216,7 @@ private:
     uint8_t dout_[FORCE_MAX_CHANNELS] = {};
     uint8_t count_   = 0;
     uint8_t pin_sck_ = 0;
+    int32_t tele_div_ = 1;      ///< siehe FORCE1_TELE_DIV / FORCE2_TELE_DIV
 
     bool initialized_ = false;
     bool tared_       = false;
@@ -214,5 +239,5 @@ private:
     static int32_t signExtend24(uint32_t value);
 
     /// Tarierten Wert auf den int16 des Downlinks bringen, mit Sat-Flag.
-    static int16_t toTelemetry(int32_t counts, bool& saturated);
+    static int16_t toTelemetry(int32_t counts, int32_t tele_div, bool& saturated);
 };

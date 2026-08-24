@@ -81,12 +81,12 @@ bool System::init() {
     // und meldet das per DL_FORCE_TARED an die Bodenstation.
     // -----------------------------------------------------------------------
     Serial.println("INFO  [System]: Initialisiere Kraftsensor 1 (3x HX711, X/Y/Z)...");
-    force1_ = new ForceHAL(PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK);
+    force1_ = new ForceHAL(PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK, FORCE1_TELE_DIV);
     force1_ready_ = force1_->init();
     logForceSensor(force1_, "Kraftsensor 1", PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK);
 
     Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (4x HX711, A/B/C/D)...");
-    force2_ = new ForceHAL(PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK);
+    force2_ = new ForceHAL(PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK, FORCE2_TELE_DIV);
     force2_ready_ = force2_->init();
     logForceSensor(force2_, "Kraftsensor 2", PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK);
 

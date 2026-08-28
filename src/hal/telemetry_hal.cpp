@@ -140,8 +140,8 @@ void TelemetryDownlink::sendForce(DownlinkForceMsg msg, const ForceReading& read
               0, data, status1, flags);
 }
 
-void TelemetryDownlink::sendMotor(int32_t position, int16_t speed, uint8_t state,
-                                  uint8_t status1, uint8_t status2) {
+void TelemetryDownlink::sendMotor(DownlinkMotorMsg msg, int32_t position, int16_t speed,
+                                  uint8_t state, uint8_t status1, uint8_t status2) {
     uint8_t data[DOWNLINK_DATA_SIZE];
     memset(data, 0, sizeof(data));
 
@@ -152,7 +152,7 @@ void TelemetryDownlink::sendMotor(int32_t position, int16_t speed, uint8_t state
     // data[7] reserved (0)
 
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::MOTOR),
-              static_cast<uint8_t>(DownlinkMotorMsg::STATE),
+              static_cast<uint8_t>(msg),
               0, data, status1, status2);
 }
 

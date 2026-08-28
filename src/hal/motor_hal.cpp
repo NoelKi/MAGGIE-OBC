@@ -59,8 +59,8 @@ void MotorHAL::writeChannels(uint8_t duty_a, uint8_t duty_b) {
     }
 }
 
-MotorHAL::MotorHAL(uint8_t pin_a, uint8_t pin_b, uint8_t motor_id)
-    : pin_a_(pin_a), pin_b_(pin_b), motor_id_(motor_id) {
+MotorHAL::MotorHAL(uint8_t pin_a, uint8_t pin_b, uint8_t motor_id, bool soft_approach)
+    : pin_a_(pin_a), pin_b_(pin_b), motor_id_(motor_id), soft_approach_(soft_approach) {
 }
 
 MotorHAL::~MotorHAL() {
@@ -107,12 +107,15 @@ void MotorHAL::setSpeed(int16_t speed) {
     if (speed > 255) speed = 255;
     if (speed < -255) speed = -255;
 
-    // Untergrenze: Darunter fliesst zwar Strom, der Motor laeuft aber nicht an
-    // (Haftreibung + Getriebe). Anheben statt fahren zu lassen - ein
-    // stehender Motor unter Strom heizt nur die Bruecke. 0 bleibt Stopp.
-    if (speed > 0 && speed <  MIN_DRIVE_SPEED) speed =  MIN_DRIVE_SPEED;
-    if (speed < 0 && speed > -MIN_DRIVE_SPEED) speed = -MIN_DRIVE_SPEED;
-
+    // KEINE Untergrenze mehr (Stand 2026-08-26): Bodentest, um die reale
+    // Anlaufschwelle des Getriebemotors zu vermessen ("ab welchem PWM reagiert
+    // er noch"). MIN_DRIVE_SPEED bleibt als TURN_SPEED/Anfahr-Zielwert fuer
+    // turnBy()/goTo() bestehen - die rufen setSpeed() nie mit einem kleineren
+    // Wert auf, sind also von dieser Aenderung nicht betroffen. Nur der
+    // manuelle Dauerlauf (on()/MOTOR_ON) kann jetzt Werte unter
+    // MIN_DRIVE_SPEED tatsaechlich ausgeben. Ein stehender Motor unter Strom
+    // heizt weiterhin nur die Bruecke - Expositionszeit bleibt durch
+    // MOTOR_ON_TIMEOUT_MS (System) auf max. 30 s begrenzt.
     current_speed_ = speed;
     braking_ = false;          // ein neuer Fahrbefehl beendet die Bremsphase
 
@@ -232,7 +235,11 @@ void MotorHAL::goTo(int16_t degrees) {
 void MotorHAL::startMove(long target, int16_t degrees, const char* kind) {
     const long start = enc_->read();
 
-    on(target > start ? TURN_SPEED : -TURN_SPEED);   // setzt turning_ zurueck
+    // soft_approach_ cruist schneller als TURN_SPEED - die Reserve nach oben
+    // ist der einzige Spielraum, weil TURN_SPEED == MIN_DRIVE_SPEED sonst
+    // keine Rampe zulaesst (siehe SOFT_APPROACH_* in motor_hal.hpp).
+    const int16_t cruise = soft_approach_ ? SOFT_APPROACH_CRUISE_SPEED : TURN_SPEED;
+    on(target > start ? cruise : -cruise);           // setzt turning_ zurueck
     turn_start_    = start;
     turn_target_   = target;
     turn_ref_pos_  = start;
@@ -256,9 +263,19 @@ void MotorHAL::updateTurn() {
     // Vergleich in Fahrtrichtung, nicht ueber den Betrag: Ein simples
     // labs(pos - target) <= Toleranz wuerde bei zu grosser Schrittweite
     // zwischen zwei Loops uebersprungen und die Drehung liefe endlos weiter.
-    const long pos     = enc_->read();
-    const bool forward = current_speed_ > 0;
-    const bool reached = forward ? pos >= turn_target_ : pos <= turn_target_;
+    const long pos       = enc_->read();
+    const bool forward   = current_speed_ > 0;
+    const bool reached   = forward ? pos >= turn_target_ : pos <= turn_target_;
+    const long remaining = labs(turn_target_ - pos);
+    const bool in_window = soft_approach_ && remaining <= SOFT_APPROACH_WINDOW_COUNTS;
+
+    // Kurz vor dem Ziel auf SOFT_APPROACH_SPEED abbremsen - weniger
+    // Aufprallenergie an einem mechanischen Anschlag. Nur einmalig aufrufen
+    // (sonst schreibt writeChannels() bei jedem Loop unnoetig denselben Wert
+    // erneut).
+    if (in_window && abs(current_speed_) > SOFT_APPROACH_SPEED) {
+        setSpeed(forward ? SOFT_APPROACH_SPEED : static_cast<int16_t>(-SOFT_APPROACH_SPEED));
+    }
 
     if (!reached) {
         // Fortschritt IN Fahrtrichtung. Faengt beide Ausfaelle ab, bei denen das
@@ -271,19 +288,40 @@ void MotorHAL::updateTurn() {
         if (progress >= TURN_MIN_COUNTS) {
             turn_ref_pos_ = pos;             // Fortschritt -> Fenster neu aufziehen
             turn_ref_ms_  = millis();
-        } else if (millis() - turn_ref_ms_ >= TURN_STALL_MS) {
-            off();
-            turn_failed_ = true;
-            Serial.printf(
-                "WARN  [MotorHAL]: Drehung abgebrochen - in %lu ms nur %ld Counts "
-                "in Fahrtrichtung. Position %ld (Start %ld, Ziel %ld, PWM %d).\n",
-                static_cast<unsigned long>(TURN_STALL_MS), progress,
-                pos, turn_start_, turn_target_, current_speed_);
-            Serial.println(
-                "WARN  [MotorHAL]: Position unveraendert -> Encoder zaehlt nicht "
-                "(Verdrahtung/Pins pruefen). Position laeuft weg -> Encoder-Kanaele "
-                "A/B vertauscht. Mechanik fest -> Motor blockiert.");
+            return;
         }
+
+        // In der Anfahrzone (in_window) gilt ein VIEL kuerzeres Stall-Fenster:
+        // Ein Motor, der dort mit vollem TURN_SPEED gegen einen Anschlag steht,
+        // kann per Blockierstrom die Versorgung einbrechen lassen (siehe
+        // SOFT_APPROACH_* oben) - das Fenster ist bewusst kurz, um genau das
+        // zu verhindern.
+        const uint32_t stall_ms = in_window ? SOFT_APPROACH_STALL_MS : TURN_STALL_MS;
+        if (millis() - turn_ref_ms_ < stall_ms) return;
+
+        off();
+
+        if (in_window) {
+            // KEIN Fehler: In der Anfahrzone ist "kein Fortschritt mehr" das
+            // ERWARTETE Ergebnis - Kontakt/Anschlag statt Encoder-Ziel. Deshalb
+            // bleibt turn_failed_ false.
+            Serial.printf(
+                "INFO  [MotorHAL]: Sanfte Anfahrt beendet (Kontakt/Anschlag) - "
+                "Position %ld (Ziel %ld, Rest %ld Counts).\n",
+                pos, turn_target_, remaining);
+            return;
+        }
+
+        turn_failed_ = true;
+        Serial.printf(
+            "WARN  [MotorHAL]: Drehung abgebrochen - in %lu ms nur %ld Counts "
+            "in Fahrtrichtung. Position %ld (Start %ld, Ziel %ld, PWM %d).\n",
+            static_cast<unsigned long>(stall_ms), progress,
+            pos, turn_start_, turn_target_, current_speed_);
+        Serial.println(
+            "WARN  [MotorHAL]: Position unveraendert -> Encoder zaehlt nicht "
+            "(Verdrahtung/Pins pruefen). Position laeuft weg -> Encoder-Kanaele "
+            "A/B vertauscht. Mechanik fest -> Motor blockiert.");
         return;
     }
 

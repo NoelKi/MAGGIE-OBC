@@ -18,6 +18,7 @@ System::~System() {
     delete imu_;
     delete downlink_;
     delete motor_;
+    delete motor2_;
     delete force1_;
     delete force2_;
     delete uplink_;
@@ -59,8 +60,8 @@ bool System::init() {
     // Motor 1 (DRV8871, ungeregelt + Quadratur-Encoder als Sensor)
     // Fehler hier sind NICHT fatal: das System laeuft ohne Motor weiter.
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder)...");
-    motor_ = new MotorHAL(PIN_M1_A, PIN_M1_B, 1);
+    Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder, sanfte Anfahrt)...");
+    motor_ = new MotorHAL(PIN_M1_A, PIN_M1_B, 1, /*soft_approach=*/true);
     motor_ready_ = motor_->init();
     if (motor_ready_) {
         motor_->initEncoder(PIN_M1_ENC_A, PIN_M1_ENC_B);
@@ -69,6 +70,22 @@ bool System::init() {
                       motor_->usesSoftPwm() ? "Software-PWM" : "Hardware-PWM");
     } else {
         Serial.println("WARN  [System]: Motor 1 konnte nicht initialisiert werden.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Motor 2 (baugleich zu Motor 1, eigene PWM-/Encoder-Pins)
+    // Fehler hier sind ebenfalls NICHT fatal.
+    // -----------------------------------------------------------------------
+    Serial.println("INFO  [System]: Initialisiere Motor 2 (DRV8871 + Encoder, sanfte Anfahrt)...");
+    motor2_ = new MotorHAL(PIN_M2_A, PIN_M2_B, 2, /*soft_approach=*/true);
+    motor2_ready_ = motor2_->init();
+    if (motor2_ready_) {
+        motor2_->initEncoder(PIN_M2_ENC_A, PIN_M2_ENC_B);
+        Serial.printf("INFO  [System]: Motor 2 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u, %s).\n",
+                      PIN_M2_A, PIN_M2_B, PIN_M2_ENC_A, PIN_M2_ENC_B,
+                      motor2_->usesSoftPwm() ? "Software-PWM" : "Hardware-PWM");
+    } else {
+        Serial.println("WARN  [System]: Motor 2 konnte nicht initialisiert werden.");
     }
 
     // -----------------------------------------------------------------------
@@ -138,7 +155,8 @@ void System::run() {
     handleStateMachine(now);
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
-    if (motor_) motor_->update();
+    if (motor_)  motor_->update();
+    if (motor2_) motor2_->update();
 
     // Kraftsensor jeden Loop pollen und im Takt der Wandlung senden (10 Hz)
     handleForce();
@@ -150,7 +168,8 @@ void System::run() {
     if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
         last_telemetry_ms_ = now;
         handleTelemetry();
-        handleMotorTelemetry();
+        handleMotorTelemetry(motor_,  motor_ready_,  DownlinkMotorMsg::STATE);
+        handleMotorTelemetry(motor2_, motor2_ready_, DownlinkMotorMsg::STATE2);
     }
 
     // Zustand + Subsystem-Gesundheit langsamer hinterherschicken (1 Hz)
@@ -173,24 +192,24 @@ void System::handleTelemetry() {
     downlink_->sendImu(reading, status1, 0);
 }
 
-void System::handleMotorTelemetry() {
-    if (!downlink_ready_ || !motor_ready_ || !motor_ || !downlink_) return;
+void System::handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg msg) {
+    if (!downlink_ready_ || !ready || !motor || !downlink_) return;
 
-    const int32_t position = static_cast<int32_t>(motor_->getPosition());
-    const int16_t speed    = motor_->getSpeed();
+    const int32_t position = static_cast<int32_t>(motor->getPosition());
+    const int16_t speed    = motor->getSpeed();
 
     // ENCODER_OK unterscheidet am Boden "Motor dreht nicht" von "Encoder ist
     // gar nicht angehaengt" - beides sieht in den Counts gleich aus.
     uint8_t state = 0;
-    if (motor_->isOn())        state |= DL_MOTOR_STATE_ON;
-    if (motor_->hasEncoder())  state |= DL_MOTOR_STATE_ENCODER_OK;
-    if (motor_->isTurning())   state |= DL_MOTOR_STATE_TURNING;
-    if (motor_->turnFailed())  state |= DL_MOTOR_STATE_TURN_FAILED;
+    if (motor->isOn())        state |= DL_MOTOR_STATE_ON;
+    if (motor->hasEncoder())  state |= DL_MOTOR_STATE_ENCODER_OK;
+    if (motor->isTurning())   state |= DL_MOTOR_STATE_TURNING;
+    if (motor->turnFailed())  state |= DL_MOTOR_STATE_TURN_FAILED;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
 
-    downlink_->sendMotor(position, speed, state, status1, 0);
+    downlink_->sendMotor(msg, position, speed, state, status1, 0);
 }
 
 void System::logForceSensor(ForceHAL* hal, const char* label,
@@ -286,6 +305,7 @@ uint8_t System::subsystemBits() const {
     if (downlink_ready_) bits |= DL_SUBSYS_DOWNLINK;
     if (force1_ready_)   bits |= DL_SUBSYS_FORCE1;
     if (force2_ready_)   bits |= DL_SUBSYS_FORCE2;
+    if (motor2_ready_)   bits |= DL_SUBSYS_MOTOR2;
     return bits;
 }
 
@@ -397,10 +417,14 @@ void System::handleUplink(uint32_t now_ms) {
                 // hinter der TEST-Sperre, liesse sich ein laufender Motor
                 // ausserhalb von TEST nur noch per ABORT stoppen, und ABORT ist
                 // ein Endzustand, aus dem nur ein Reset herausfuehrt.
-                if (motor_ready_ && motor_) {
-                    Serial.println("INFO  [System]: TC MOTOR_OFF (zustandsunabhaengig)");
-                    motor_->off();
-                }
+                Serial.println("INFO  [System]: TC MOTOR_OFF (zustandsunabhaengig)");
+                execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::OFF, 0, motor_on_since_ms_);
+                continue;
+
+            case UplinkOpcode::MOTOR2_OFF:
+                // Gleiche Ausnahme wie MOTOR_OFF, fuer Motor 2.
+                Serial.println("INFO  [System]: TC MOTOR2_OFF (zustandsunabhaengig)");
+                execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::OFF, 0, motor2_on_since_ms_);
                 continue;
 
             default:
@@ -422,55 +446,95 @@ void System::handleUplink(uint32_t now_ms) {
     }
 }
 
-bool System::handleMotorCommand(const UplinkCommand& cmd) {
-    if (!motor_ready_ || !motor_) {
-        Serial.println("WARN  [System]: Motor-Telecommand ohne initialisierten Motor - ignoriert.");
+bool System::execMotorAction(MotorHAL* motor, bool ready, const char* label,
+                             MotorAction action, int16_t arg, uint32_t& on_since_ms) {
+    if (!ready || !motor) {
+        Serial.printf("WARN  [System]: %s-Telecommand ohne initialisierten Motor - ignoriert.\n", label);
         return true;   // bekanntes Kommando, nur keine Hardware
     }
 
-    switch (static_cast<UplinkOpcode>(cmd.opcode)) {
-        case UplinkOpcode::MOTOR_ON:
-            Serial.printf("INFO  [System]: TC MOTOR_ON (speed=%d)\n", cmd.arg);
-            motor_->on(cmd.arg);
+    switch (action) {
+        case MotorAction::ON:
+            Serial.printf("INFO  [System]: TC %s_ON (speed=%d)\n", label, arg);
+            motor->on(arg);
             // Sichtbar machen, wenn die Anlaufgrenze gegriffen hat - sonst
             // wundert man sich am Boden ueber den abweichenden PWM-Istwert.
-            if (cmd.arg != 0 && motor_->getSpeed() != cmd.arg) {
+            if (arg != 0 && motor->getSpeed() != arg) {
                 Serial.printf("WARN  [System]: PWM %d unter der Anlaufgrenze "
                               "(%d) - auf %d angehoben.\n",
-                              cmd.arg, MotorHAL::MIN_DRIVE_SPEED, motor_->getSpeed());
+                              arg, MotorHAL::MIN_DRIVE_SPEED, motor->getSpeed());
             }
-            motor_on_since_ms_ = millis();
+            on_since_ms = millis();
             return true;
-        case UplinkOpcode::MOTOR_TURN:
-            Serial.printf("INFO  [System]: TC MOTOR_TURN (%d Grad relativ)\n", cmd.arg);
-            if (!motor_->hasEncoder()) {
-                Serial.println("WARN  [System]: MOTOR_TURN ohne Encoder - ignoriert.");
+        case MotorAction::TURN:
+            Serial.printf("INFO  [System]: TC %s_TURN (%d Grad relativ)\n", label, arg);
+            if (!motor->hasEncoder()) {
+                Serial.printf("WARN  [System]: %s_TURN ohne Encoder - ignoriert.\n", label);
                 return true;
             }
-            motor_->turnBy(cmd.arg);
+            motor->turnBy(arg);
             // Der Watchdog gilt auch hier: Bleibt der Encoder stehen (Mechanik
             // fest, Kanal ab), erreicht update() sein Ziel nie.
-            motor_on_since_ms_ = millis();
+            on_since_ms = millis();
             return true;
-        case UplinkOpcode::MOTOR_GOTO:
-            Serial.printf("INFO  [System]: TC MOTOR_GOTO (%d Grad absolut)\n", cmd.arg);
-            if (!motor_->hasEncoder()) {
-                Serial.println("WARN  [System]: MOTOR_GOTO ohne Encoder - ignoriert.");
+        case MotorAction::GOTO:
+            Serial.printf("INFO  [System]: TC %s_GOTO (%d Grad absolut)\n", label, arg);
+            if (!motor->hasEncoder()) {
+                Serial.printf("WARN  [System]: %s_GOTO ohne Encoder - ignoriert.\n", label);
                 return true;
             }
-            motor_->goTo(cmd.arg);
-            motor_on_since_ms_ = millis();
+            motor->goTo(arg);
+            on_since_ms = millis();
             return true;
+        case MotorAction::OFF:
+            Serial.printf("INFO  [System]: TC %s_OFF\n", label);
+            motor->off();
+            return true;
+        case MotorAction::ZERO:
+            Serial.printf("INFO  [System]: TC %s_ZERO - Encoder-Zaehler auf 0\n", label);
+            motor->zeroPosition();
+            return true;
+    }
+    return false;
+}
+
+bool System::handleMotorCommand(const UplinkCommand& cmd) {
+    switch (static_cast<UplinkOpcode>(cmd.opcode)) {
+        case UplinkOpcode::MOTOR_ON:
+            return execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::ON, cmd.arg, motor_on_since_ms_);
+        case UplinkOpcode::MOTOR_TURN:
+            return execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::TURN, cmd.arg, motor_on_since_ms_);
+        case UplinkOpcode::MOTOR_GOTO:
+            return execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::GOTO, cmd.arg, motor_on_since_ms_);
         case UplinkOpcode::MOTOR_OFF:
-            Serial.println("INFO  [System]: TC MOTOR_OFF");
-            motor_->off();
-            return true;
+            return execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::OFF, cmd.arg, motor_on_since_ms_);
         case UplinkOpcode::MOTOR_ZERO:
-            Serial.println("INFO  [System]: TC MOTOR_ZERO - Encoder-Zaehler auf 0");
-            motor_->zeroPosition();
-            return true;
+            return execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::ZERO, cmd.arg, motor_on_since_ms_);
+
+        case UplinkOpcode::MOTOR2_ON:
+            return execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::ON, cmd.arg, motor2_on_since_ms_);
+        case UplinkOpcode::MOTOR2_TURN:
+            return execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::TURN, cmd.arg, motor2_on_since_ms_);
+        case UplinkOpcode::MOTOR2_GOTO:
+            return execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::GOTO, cmd.arg, motor2_on_since_ms_);
+        case UplinkOpcode::MOTOR2_OFF:
+            return execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::OFF, cmd.arg, motor2_on_since_ms_);
+        case UplinkOpcode::MOTOR2_ZERO:
+            return execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::ZERO, cmd.arg, motor2_on_since_ms_);
         default:
             return false;
+    }
+}
+
+void System::checkMotorTimeout(MotorHAL* motor, bool ready, const char* label,
+                               uint32_t on_since_ms, uint32_t now_ms) {
+    if (!ready || !motor || !motor->isOn()) return;
+
+    if (now_ms - on_since_ms >= MOTOR_ON_TIMEOUT_MS) {
+        Serial.printf("WARN  [System]: %s-Laufzeit ueber %lu ms - "
+                      "automatisch gestoppt. Erneut %s_ON senden.\n",
+                      label, static_cast<unsigned long>(MOTOR_ON_TIMEOUT_MS), label);
+        motor->off();
     }
 }
 
@@ -480,14 +544,9 @@ void System::handleMotorTimeout(uint32_t now_ms) {
     // der Prueflig ist, ist das am Tisch ein Risiko. Der Watchdog ist die
     // Rueckfallebene; MOTOR_ON_TIMEOUT_MS = 0 schaltet ihn ab.
     if (MOTOR_ON_TIMEOUT_MS == 0) return;
-    if (!motor_ready_ || !motor_ || !motor_->isOn()) return;
 
-    if (now_ms - motor_on_since_ms_ >= MOTOR_ON_TIMEOUT_MS) {
-        Serial.printf("WARN  [System]: Motor-Laufzeit ueber %lu ms - "
-                      "automatisch gestoppt. Erneut MOTOR_ON senden.\n",
-                      static_cast<unsigned long>(MOTOR_ON_TIMEOUT_MS));
-        motor_->off();
-    }
+    checkMotorTimeout(motor_,  motor_ready_,  "MOTOR",  motor_on_since_ms_,  now_ms);
+    checkMotorTimeout(motor2_, motor2_ready_, "MOTOR2", motor2_on_since_ms_, now_ms);
 }
 
 void System::printWelcomeBanner() {

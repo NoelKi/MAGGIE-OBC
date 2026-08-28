@@ -55,6 +55,15 @@ enum class UplinkOpcode : uint8_t {
     MOTOR_TURN      = 0x06,   ///< Drehung um ARG Grad RELATIV, stoppt am Ziel
     MOTOR_GOTO      = 0x07,   ///< Fahrt auf ARG Grad ABSOLUT (bezogen auf die Encoder-Null)
 
+    // Motor 2 - baugleich zu Motor 1, eigene Opcodes statt eines Motor-Index
+    // im ARG: ARG traegt bei ON/TURN/GOTO bereits Speed/Winkel, fuer eine
+    // zusaetzliche Motorauswahl ist im 6-Byte-Frame kein Platz mehr.
+    MOTOR2_OFF      = 0x08,   ///< Motor 2 ausschalten
+    MOTOR2_ON       = 0x09,   ///< Motor 2 drehen; ARG = Speed -255..+255 (0 = Default)
+    MOTOR2_ZERO     = 0x0A,   ///< Motor 2 Encoder-Zaehler auf 0 setzen (stoppt den Motor)
+    MOTOR2_TURN     = 0x0B,   ///< Motor 2 Drehung um ARG Grad RELATIV, stoppt am Ziel
+    MOTOR2_GOTO     = 0x0C,   ///< Motor 2 Fahrt auf ARG Grad ABSOLUT (bezogen auf die Encoder-Null)
+
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH
     ABORT           = 0x1F,   ///< Abbruch: Aktoren stoppen -> ABORT

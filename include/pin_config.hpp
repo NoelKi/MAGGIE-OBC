@@ -49,8 +49,12 @@ static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope (CS_GY
 //
 // Pin 19 ist laut Tabelle CAMDIR1 (Kamera-MUX, in dieser Firmware nicht
 // instanziiert) und war nur die Behelfsverdrahtung des Tischaufbaus.
-static constexpr uint8_t PIN_M1_A = 18;        ///< Motor 1 Channel A (vorwaerts, M1_A)
-static constexpr uint8_t PIN_M1_B = 14;        ///< Motor 1 Channel B (rueckwaerts, M1_B)
+//
+// A/B GETAUSCHT (Bodentest 2026-08-26): Motor 1 drehte bei positivem
+// setSpeed() falsch herum - gleicher Fix wie bei Motor 2 (siehe unten):
+// PIN_M1_A/PIN_M1_B getauscht, keine Software-/GUI-Aenderung noetig.
+static constexpr uint8_t PIN_M1_A = 14;        ///< Motor 1 Channel A (vorwaerts, M1_B-Leitung)
+static constexpr uint8_t PIN_M1_B = 18;        ///< Motor 1 Channel B (rueckwaerts, M1_A-Leitung)
 
 // Motor 1 Quadratur-Encoder (A/B) - reine Positionsmessung, keine Regelung.
 // Verbaut: Pololu enc03d (0J12461) am Getriebemotor.
@@ -64,6 +68,31 @@ static constexpr uint8_t PIN_M1_B = 14;        ///< Motor 1 Channel B (rueckwaer
 // wird. Mit 5/6 entfaellt diese Kollision.
 static constexpr uint8_t PIN_M1_ENC_A = 5;     ///< Motor 1 Encoder Channel A (ENC_HDRM1A)
 static constexpr uint8_t PIN_M1_ENC_B = 6;     ///< Motor 1 Encoder Channel B (ENC_HDRM1B)
+
+// ===========================================================================
+// Motor 2 - HDRM-Antrieb (DRV8871), baugleich zu Motor 1
+// ===========================================================================
+// Belegungstabelle: 23 = M2_A, 15 = M2_B (Pololu 380/1 am DRV8871).
+//
+// Beide Pins haben eigene Hardware-Timer, UNABHAENGIG von Motor 1 (18/14):
+// Pin 23 = FlexPWM4_1_A, Pin 15 = QuadTimer3_3 (siehe cores/teensy4/pwm.c,
+// pwm_pin_info[]). Motor 1 haengt an QuadTimer3 Kanal 1/2 - keine der beiden
+// Gruppen teilt sich ein Timer-Modul, analogWriteFrequency() auf dem einen
+// Motor beeinflusst den anderen also nicht.
+//
+// A/B GETAUSCHT (Bodentest 2026-08-26): Motor 2 drehte bei positivem
+// setSpeed() genau entgegengesetzt zu Motor 1 - HDRM Open/Close waren damit
+// vertauscht. Fix wie bei Motor 1 oben beschrieben ("Dreht der Motor
+// verkehrt herum, die beiden Zeilen tauschen"): PIN_M2_A/PIN_M2_B getauscht,
+// damit positives setSpeed()/turnBy()/goTo() bei Motor 2 dieselbe reale
+// Drehrichtung ergibt wie bei Motor 1 - keine Software-/GUI-Aenderung noetig.
+static constexpr uint8_t PIN_M2_A = 15;        ///< Motor 2 Channel A (vorwaerts, M2_B-Leitung)
+static constexpr uint8_t PIN_M2_B = 23;        ///< Motor 2 Channel B (rueckwaerts, M2_A-Leitung)
+
+// Motor 2 Quadratur-Encoder (A/B), baugleich zu Motor 1: Pololu enc03d (0J12461).
+// Belegungstabelle: 7 = ENC_HDRM2A, 8 = ENC_HDRM2B.
+static constexpr uint8_t PIN_M2_ENC_A = 7;     ///< Motor 2 Encoder Channel A (ENC_HDRM2A)
+static constexpr uint8_t PIN_M2_ENC_B = 8;     ///< Motor 2 Encoder Channel B (ENC_HDRM2B)
 
 // ===========================================================================
 // Kraftsensoren - je eine HX711-Gruppe an EINEM gemeinsamen Takt

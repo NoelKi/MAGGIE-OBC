@@ -55,6 +55,7 @@ private:
     IMUHAL* imu_ = nullptr;                             ///< BMI088 IMU (SPI)
     TelemetryDownlink* downlink_ = nullptr;            ///< Downlink telemetry (Serial4, pins 16/17)
     MotorHAL* motor_ = nullptr;                         ///< Motor 1 (DRV8871, Open-Loop + Encoder als Sensor)
+    MotorHAL* motor2_ = nullptr;                        ///< Motor 2 (baugleich zu Motor 1)
     ForceHAL* force1_ = nullptr;                        ///< Kraftsensor 1 (3x HX711, gemeinsamer Takt)
     ForceHAL* force2_ = nullptr;                        ///< Kraftsensor 2 (4x HX711, gemeinsamer Takt)
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
@@ -76,7 +77,8 @@ private:
     // Der Motor laeuft Open-Loop und stoppt nicht mehr von selbst. Diese Grenze
     // ist die Rueckfallebene, falls MOTOR_OFF nicht durchkommt. 0 = aus.
     static constexpr uint32_t MOTOR_ON_TIMEOUT_MS = 30000;
-    uint32_t motor_on_since_ms_ = 0;        ///< Zeitpunkt des letzten MOTOR_ON
+    uint32_t motor_on_since_ms_  = 0;       ///< Zeitpunkt des letzten MOTOR_ON
+    uint32_t motor2_on_since_ms_ = 0;       ///< Zeitpunkt des letzten MOTOR2_ON
 
     // Kein Subsystem-Fehler ist fatal: der OBC laeuft degradiert weiter, statt
     // z.B. wegen eines fehlenden Motors auch die Telemetrie abzuschalten.
@@ -88,6 +90,7 @@ private:
     bool rexus_ready_ = false;              ///< REXUS-Signalpins konfiguriert
     bool force1_ready_ = false;             ///< Kraftsensor 1 initialisiert
     bool force2_ready_ = false;             ///< Kraftsensor 2 initialisiert
+    bool motor2_ready_ = false;             ///< Motor 2 (inkl. Encoder) initialisiert
 
     // -----------------------------------------------------------------------
     // Kraftsensoren
@@ -110,9 +113,14 @@ private:
     /// stehendem Wandler in JEDEM Loop ein Frame raus (siehe handleForceSensor).
     static constexpr uint32_t FORCE_STALE_TX_INTERVAL_MS = 1000;
 
+    /// Logische Motor-Aktion, unabhaengig vom Wire-Opcode (siehe execMotorAction).
+    enum class MotorAction : uint8_t { OFF, ON, ZERO, TURN, GOTO };
+
     void printWelcomeBanner();
     void handleTelemetry();
-    void handleMotorTelemetry();
+
+    /// Ein MOTOR/STATE(2)-Frame fuer den angegebenen Motor senden, wenn bereit.
+    void handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg msg);
     void handleForce();
 
     /// Einen Kraftsensor pollen und bei neuem Messwert (oder Haenger) senden.
@@ -130,7 +138,19 @@ private:
     void onStateChanged(MissionState previous, MissionState current);
     void handleUplink(uint32_t now_ms);
     bool handleMotorCommand(const UplinkCommand& cmd);
+
+    /// Gemeinsame Kommandologik fuer Motor 1 und Motor 2 (siehe MotorAction).
+    /// Motor-agnostisch: welcher Wire-Opcode auf welche Aktion/welchen Motor
+    /// abbildet, entscheidet handleMotorCommand().
+    bool execMotorAction(MotorHAL* motor, bool ready, const char* label,
+                         MotorAction action, int16_t arg, uint32_t& on_since_ms);
+
     void handleMotorTimeout(uint32_t now_ms);
+
+    /// Laufzeitbegrenzung eines einzelnen Motors (siehe MOTOR_ON_TIMEOUT_MS).
+    void checkMotorTimeout(MotorHAL* motor, bool ready, const char* label,
+                           uint32_t on_since_ms, uint32_t now_ms);
+
     uint8_t subsystemBits() const;
 };
 

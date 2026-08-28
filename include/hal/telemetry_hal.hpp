@@ -128,7 +128,8 @@ enum class DownlinkImuMsg : uint8_t {
 
 // MSGID2 - message type for the MOTOR subsystem
 enum class DownlinkMotorMsg : uint8_t {
-    STATE = 0x01,
+    STATE  = 0x01,   ///< Motor 1
+    STATE2 = 0x02,   ///< Motor 2 - baugleich, eigenes Frame wie FORCE TARGET1/TARGET2
 };
 
 // MSGID2 - message type for the FORCE subsystem
@@ -175,13 +176,12 @@ static constexpr uint8_t DL_FORCE_TARED = 0x10;  ///< bit4: Nullabgleich gueltig
 static constexpr uint8_t DL_FORCE_STALE = 0x20;  ///< bit5: seit FORCE_STALE_MS keine neue Wandlung
 
 // SYS/STATE - subsystem byte bit definitions (DATA[1])
-// Bit 4 war frueher Kraftsensor 2 (Target 2) und bleibt reserviert, damit er
-// seine alte Bitposition zurueckbekommt.
 static constexpr uint8_t DL_SUBSYS_IMU      = 0x01;  ///< bit0: IMU initialisiert
-static constexpr uint8_t DL_SUBSYS_MOTOR    = 0x02;  ///< bit1: Motor + Encoder initialisiert
+static constexpr uint8_t DL_SUBSYS_MOTOR    = 0x02;  ///< bit1: Motor 1 + Encoder initialisiert
 static constexpr uint8_t DL_SUBSYS_DOWNLINK = 0x04;  ///< bit2: Downlink-UART offen
 static constexpr uint8_t DL_SUBSYS_FORCE1   = 0x08;  ///< bit3: Kraftsensor 1 initialisiert
 static constexpr uint8_t DL_SUBSYS_FORCE2   = 0x10;  ///< bit4: Kraftsensor 2 initialisiert
+static constexpr uint8_t DL_SUBSYS_MOTOR2   = 0x20;  ///< bit5: Motor 2 + Encoder initialisiert
 
 class TelemetryDownlink {
 public:
@@ -210,15 +210,16 @@ public:
     void sendImu(const IMUReading& reading, uint8_t status1 = 0, uint8_t status2 = 0);
 
     /**
-     * @brief Send the current motor state as one MOTOR/STATE frame.
+     * @brief Send the current motor state as one MOTOR/STATE (oder STATE2) frame.
      *
+     * @param msg      STATE (Motor 1) oder STATE2 (Motor 2)
      * @param position Encoder position in quadrature counts
      * @param speed    Current signed PWM speed (-255..255)
      * @param state    State bitfield (see DL_MOTOR_STATE_* flags)
      * @param status1  STATUS1 byte (see DL_STATUS1_* flags)
      * @param status2  STATUS2 byte
      */
-    void sendMotor(int32_t position, int16_t speed, uint8_t state,
+    void sendMotor(DownlinkMotorMsg msg, int32_t position, int16_t speed, uint8_t state,
                    uint8_t status1 = 0, uint8_t status2 = 0);
 
     /**

@@ -36,11 +36,14 @@ public:
     /// Haftreibung plus Getriebewiderstand - und unter Last wird die Schwelle
     /// eher hoeher, nie niedriger. 220 haelt bewusst Abstand dazu.
     ///
-    /// setSpeed() hebt jeden Fahrbefehl unterhalb dieses Betrags an. Ein zu
-    /// kleiner Wert wuerde sonst den schlimmsten Fall erzeugen: Strom fliesst,
-    /// der Motor steht, die H-Bruecke heizt - und bei einer Fahrt auf
-    /// Encoder-Ziel liefe zusaetzlich der Stillstands-Abbruch los.
-    /// 0 bleibt 0 (Stopp), das Vorzeichen bleibt erhalten.
+    /// turnBy()/goTo() fahren nie mit weniger als diesem Wert (siehe
+    /// TURN_SPEED) - ein Fahrbefehl auf Encoder-Ziel braucht die Anlaufschwelle,
+    /// sonst liefe der Stillstands-Abbruch sofort los, ohne dass sich etwas
+    /// bewegt hat.
+    ///
+    /// setSpeed() selbst hebt seit dem Bodentest vom 2026-08-26 NICHT mehr an
+    /// (siehe motor_hal.cpp) - der manuelle Dauerlauf (on()/MOTOR_ON) darf
+    /// bewusst auch darunter fahren, um die reale Anlaufschwelle zu vermessen.
     static constexpr int16_t MIN_DRIVE_SPEED = 220;
 
     /**
@@ -48,8 +51,11 @@ public:
      * @param pin_a Channel A (PWM)
      * @param pin_b Channel B (PWM)
      * @param motor_id Motor identifier (1-3)
+     * @param soft_approach Sanfte Anfahrt fuer turnBy()/goTo() (siehe unten,
+     *                      SOFT_APPROACH_*). Bewusst per Instanz statt global,
+     *                      damit Motor 1 unveraendert bleibt.
      */
-    MotorHAL(uint8_t pin_a, uint8_t pin_b, uint8_t motor_id = 0);
+    MotorHAL(uint8_t pin_a, uint8_t pin_b, uint8_t motor_id = 0, bool soft_approach = false);
     ~MotorHAL();
 
     /**
@@ -209,6 +215,7 @@ private:
     uint8_t pin_a_;
     uint8_t pin_b_;
     uint8_t motor_id_;
+    bool soft_approach_ = false;   ///< siehe SOFT_APPROACH_* oben
     int16_t current_speed_ = 0;
     bool initialized_ = false;
 
@@ -285,6 +292,38 @@ private:
     // ueberhaupt auffaellt, dass etwas nicht stimmt.
     static constexpr uint32_t TURN_STALL_MS    = 1000;  ///< Fenster ohne Fortschritt
     static constexpr long     TURN_MIN_COUNTS  = 3;     ///< Fortschritt, der als Bewegung zaehlt
+
+    // -----------------------------------------------------------------------
+    // Sanfte Anfahrt (nur wenn soft_approach_ true ist, siehe Konstruktor)
+    // -----------------------------------------------------------------------
+    // Hintergrund: TURN_SPEED == MIN_DRIVE_SPEED, es gibt also normalerweise
+    // GAR KEINE Drehzahlreserve fuer eine Rampe - unter MIN_DRIVE_SPEED laeuft
+    // der Motor gar nicht erst an. soft_approach_ nutzt deshalb die Reserve
+    // NACH OBEN: cruist mit SOFT_APPROACH_CRUISE_SPEED (> TURN_SPEED) und
+    // bremst erst kurz vor dem Ziel auf SOFT_APPROACH_SPEED herunter - weniger
+    // Aufprallenergie an einem mechanischen Anschlag, ohne dass der Motor
+    // vorher stehenbleibt.
+    //
+    // SOFT_APPROACH_SPEED = 170 (Bodentest 2026-08-26): Der Bodentest mit
+    // frei zugaenglichem PWM-Bereich (siehe MOTOR_ON) hat die reale, lastfreie
+    // Anlaufschwelle bei ~150 bestaetigt (siehe MIN_DRIVE_SPEED-Kommentar).
+    // 170 haelt etwas Abstand darueber, ist aber spuerbar sanfter als die
+    // bisherigen 220 (MIN_DRIVE_SPEED) fuer die Anfahrt selbst. MIN_DRIVE_SPEED
+    // bleibt unveraendert der Wert fuer TURN_SPEED/DEFAULT_ON_SPEED - dort
+    // zaehlt zuverlaessiges Anlaufen unter Last mehr als Sanftheit.
+    //
+    // Zusaetzlich gilt in dieser Anfahrzone ein VIEL kuerzeres Stall-Fenster:
+    // Ein Vorfall (Motor 2, siehe Command-Log) fuhr mit vollem TURN_SPEED
+    // gegen einen Anschlag und stand die vollen TURN_STALL_MS mit
+    // Blockierstrom an, bevor der Watchdog abschaltete - plausibel genug, um
+    // den Teensy per Spannungseinbruch zu resetten. In der Anfahrzone wird
+    // "kein Fortschritt mehr" deshalb nicht als Fehler gewertet, sondern als
+    // ERREICHTES Ziel (Kontakt/Anschlag) interpretiert - turn_failed_ bleibt
+    // false, der Motor schaltet trotzdem sofort ab.
+    static constexpr long     SOFT_APPROACH_WINDOW_COUNTS = 300;  // ~24 Grad bei 4550 Counts/U
+    static constexpr uint32_t SOFT_APPROACH_STALL_MS       = 150;
+    static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 255;
+    static constexpr int16_t  SOFT_APPROACH_SPEED          = 170;
 
     /// Dauer des Bremsimpulses am Ende einer Fahrt. Lang genug, damit der
     /// Anker steht, kurz genug, dass die H-Bruecke danach wieder schlafen kann.

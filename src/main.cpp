@@ -36,17 +36,16 @@ void setup() {
     // Monitor vorher.
     Serial.begin(115200);
 
-    // War der letzte Reset ein Watchdog-Reset? Nur fuers Terminal - am Boden
-    // zeigt ihn die zurueckgesprungene Uptime im SYS/STATE-Frame.
-    if (SRC_SRSR & SRC_SRSR_WDOG_RST_B) {
-        Serial.println("WARN  [main]: Letzter Neustart durch den Watchdog.");
-    }
+    // War der letzte Reset ein Watchdog-Reset? Am Boden zeigt ihn die
+    // zurueckgesprungene Uptime im SYS/STATE-Frame; der SD-Logger braucht ihn
+    // fuer seinen Haenger-Schutz (siehe sd_logger.hpp).
+    const bool after_watchdog_reset = (SRC_SRSR & SRC_SRSR_WDOG_RST_B) != 0;
     SRC_SRSR = SRC_SRSR;   // Reset-Gruende quittieren (write-1-to-clear)
 
     // System::init() startet auch degradiert - fehlende Subsysteme meldet
     // es per Subsystem-Bits an die Bodenstation, statt anzuhalten.
     g_system = new System();
-    g_system->init();
+    g_system->init(after_watchdog_reset);
 
     watchdogStart();
 }

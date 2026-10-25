@@ -86,6 +86,7 @@ void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
     frame[19] = DL_END;
 
     serial_.write(frame, DOWNLINK_FRAME_SIZE);
+    if (tap_) tap_(tap_ctx_, frame, DOWNLINK_FRAME_SIZE);
     counter_++;
 }
 

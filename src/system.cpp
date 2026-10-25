@@ -33,10 +33,19 @@ System::~System() {
     delete rexus_;
 }
 
-bool System::init() {
+bool System::init(bool after_watchdog_reset) {
     startup_time = millis();
 
     printWelcomeBanner();
+
+    // -----------------------------------------------------------------------
+    // Nichtfluechtiger Speicher - zuerst, damit Boot-Nummer und letzter
+    // Zustand feststehen, bevor irgendetwas anderes startet.
+    // -----------------------------------------------------------------------
+    persist_.begin();
+    Serial.printf("INFO  [System]: Boot Nr. %lu%s.\n",
+                  static_cast<unsigned long>(persist_.bootCount()),
+                  after_watchdog_reset ? " (nach Watchdog-Reset)" : "");
 
     // -----------------------------------------------------------------------
     // IMU (BMI088 ueber SPI) - fuer Telemetrie-Downlink
@@ -60,6 +69,13 @@ bool System::init() {
     downlink_ready_ = downlink_->init(DOWNLINK_BAUDRATE);
     Serial4.addMemoryForWrite(serial4_tx_extra, sizeof(serial4_tx_extra));
     Serial4.addMemoryForRead(serial4_rx_extra, sizeof(serial4_rx_extra));   // Uplink
+
+    // Bordspeicher: jedes gesendete Frame geht zusaetzlich in den SD-Puffer.
+    // Fehlt die Karte, laeuft alles andere unveraendert weiter.
+    sd_.begin(persist_.bootCount(), after_watchdog_reset);
+    downlink_->setTap([](void* ctx, const uint8_t* frame, uint8_t len) {
+        static_cast<SdLogger*>(ctx)->push(frame, len);
+    }, &sd_);
     if (downlink_ready_) {
         Serial.println("INFO  [System]: Downlink bereit (38400 Baud).");
     } else {
@@ -131,11 +147,16 @@ bool System::init() {
     rexus_ = new REXUSHAL(PIN_L0_T, PIN_SOE_I, PIN_SODS_I);
     rexus_ready_ = rexus_->init();
 
-    state_machine_.init();
+    // Zustand des letzten Laufs wiederherstellen (siehe stateAfterReboot).
+    uint8_t stored = 0;
+    const bool stored_valid = persist_.loadState(stored);
+    state_machine_.init(StateMachine::stateAfterReboot(stored, stored_valid));
     last_state_ = state_machine_.getState();
-    Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s "
-                  "(Telecommand TEST_ENTER schaltet in den Bodentest).\n",
-                  StateMachine::toString(last_state_));
+    persist_.saveState(static_cast<uint8_t>(last_state_));   // z.B. TEST -> PRE_LAUNCH festhalten
+    Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s).\n",
+                  StateMachine::toString(last_state_),
+                  stored_valid ? StateMachine::toString(static_cast<MissionState>(stored))
+                               : "nichts");
 
     // -----------------------------------------------------------------------
     // Zusammenfassung. Der OBC startet auch dann, wenn einzelne Subsysteme
@@ -192,6 +213,13 @@ void System::run() {
         last_sys_telemetry_ms_ = now;
         handleSystemTelemetry(now);
     }
+
+    // Bordspeicher zuletzt: hoechstens eine SD-Operation, nie bei laufendem Motor.
+    sd_.service(now, !motorsRunning());
+}
+
+bool System::motorsRunning() const {
+    return (motor_ && motor_->isOn()) || (motor2_ && motor2_->isOn());
 }
 
 void System::handleTelemetry() {
@@ -376,6 +404,9 @@ void System::handleStateMachine(uint32_t now_ms) {
 void System::onStateChanged(MissionState previous, MissionState current) {
     (void)previous;
 
+    // Sofort festhalten, damit ein Neustart im richtigen Zustand weitermacht.
+    persist_.saveState(static_cast<uint8_t>(current));
+
     // Aktoren stillsetzen, sobald der Freigabezustand (TEST) verlassen wird -
     // insbesondere bei TEST_EXIT und bei einem ABORT. BEIDE Motoren: Ein
     // vergessener Motor liefe sonst bis zum Watchdog weiter.
@@ -409,6 +440,11 @@ void System::handleUplink(uint32_t now_ms) {
             case UplinkOpcode::ABORT:
                 Serial.println("WARN  [System]: ABORT per Telecommand empfangen.");
                 abort_requested_ = true;
+                continue;
+            case UplinkOpcode::STATE_RESET:
+                // Erst den Abbruch-Latch loesen, sonst schaltet update() im
+                // selben Loop sofort wieder auf ABORT.
+                if (state_machine_.resetFromAbort(now_ms)) abort_requested_ = false;
                 continue;
 
             case UplinkOpcode::FORCE_TARE:

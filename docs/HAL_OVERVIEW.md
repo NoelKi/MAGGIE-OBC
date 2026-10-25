@@ -11,6 +11,7 @@ the source of truth for pins is `include/pin_config.hpp`, for wire formats
 src/main.cpp              setup()/loop(), hardware watchdog
 src/system.cpp            System: owns every module, runs the loop
 src/statemachine/         PRE_LAUNCH / TEST / ABORT
+src/storage/              persistent state (EEPROM), SD-card log
 src/hal/                  one file per hardware module (see below)
 src/hardwareTest/         standalone test sketches, excluded from the build
 include/                  headers, same layout; pin_config.hpp = all pins
@@ -50,6 +51,7 @@ interrupts are the encoder counters and the UART/USB drivers.
 | 50 ms | motor 1 + 2 position, PWM, flags | `02/01`, `02/02` |
 | 1 s | state, subsystem bits, uptime, REXUS levels | `03/01` |
 | 1 s | uplink statistics, raw header of last uplink burst | `03/02`, `03/03` |
+| every loop | SD log: at most one card operation, never while a motor runs | – |
 
 Downlink load is about 55 % of 38400 baud. Serial4 has an extra 512-byte send
 buffer, so writes never wait on the UART.
@@ -57,14 +59,19 @@ buffer, so writes never wait on the UART.
 ## State machine
 
 ```
-reset ─► PRE_LAUNCH ──TEST_ENTER──► TEST
-             ▲  │                    │
-             └──┼────TEST_EXIT───────┘
-                │                    │
-                └──ABORT──► ABORT ◄──ABORT      (terminal, only a reset leaves)
+boot ─► (stored state) ─► PRE_LAUNCH ──TEST_ENTER──► TEST
+                              ▲  │                     │
+                              └──┼─────TEST_EXIT───────┘
+                              │  │                     │
+                  STATE_RESET │  └──ABORT──► ABORT ◄───ABORT
+                              └──────────────┘
 ```
 
 - Transitions come only from telecommands.
+- Every transition is stored in EEPROM. After a reboot (watchdog, power loss,
+  reflash) `StateMachine::stateAfterReboot()` picks the start state: ABORT
+  stays ABORT, TEST falls back to PRE_LAUNCH, nothing stored or a damaged
+  value gives PRE_LAUNCH. New flight states get their rule there.
 - Leaving TEST (by `TEST_EXIT` or `ABORT`) turns both motors off.
 - State values on the wire are fixed: PRE_LAUNCH 0, ABORT 5, TEST 6. Values 1–4
   are reserved for the planned flight sequence in `maggie_state_machine.puml`.
@@ -76,12 +83,31 @@ reset ─► PRE_LAUNCH ──TEST_ENTER──► TEST
 | `0x10` | TEST_ENTER | PRE_LAUNCH |
 | `0x11` | TEST_EXIT | TEST |
 | `0x1F` | ABORT | any |
+| `0x12` | STATE_RESET | ABORT |
 | `0x20` | FORCE_TARE (arg 0 = both, 1, 2) | any |
 | `0x00`, `0x08` | MOTOR_OFF, MOTOR2_OFF | any |
 | `0x01 0x05 0x06 0x07` | MOTOR_ON, ZERO, TURN, GOTO | TEST |
 | `0x09 0x0A 0x0B 0x0C` | MOTOR2_ON, ZERO, TURN, GOTO | TEST |
 
 Counterpart on the ground: `MAGGIE_SERVER/app/routes/command.py`.
+
+## On-board storage
+
+| What | Where | Survives |
+|---|---|---|
+| Mission state, boot counter | EEPROM emulation in flash (`PersistentState`) | reset, power loss, reflash |
+| Every downlink frame | SD card, `/B<boot>/F<n>.BIN` (`SdLogger`) | power loss, except the open file |
+
+- SD files hold the 20-byte downlink frames back to back, byte-identical to
+  the UART. A new file starts every 10 s, about 20 KB each.
+- Frames go into a 128 KB RAM buffer (> 60 s of telemetry) first. The card is
+  written in 512-byte chunks, one operation per loop, and not at all while a
+  motor runs (card busy times of 100–250 ms would overshoot a turn).
+- Any SD error switches logging off until the next boot. If a watchdog reset
+  happened inside an SD call (marker in `SNVS_LPGPR0`), the card stays off for
+  that boot instead of causing a reset loop.
+- Flash writes block interrupts (µs normally, 45–400 ms for a rare sector
+  erase), so EEPROM is written only at boot and on state changes.
 
 ## Safety mechanisms
 

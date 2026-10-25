@@ -7,6 +7,8 @@
 #include "hal/uplink_hal.hpp"
 #include "hal/rexus_hal.hpp"
 #include "statemachine/state_machine.hpp"
+#include "storage/persistent_state.hpp"
+#include "storage/sd_logger.hpp"
 #include "pin_config.hpp"
 
 /**
@@ -34,9 +36,10 @@ public:
 
     /**
      * @brief Initialisiert das gesamte System
+     * @param after_watchdog_reset true, wenn der letzte Reset vom Watchdog kam
      * @return true wenn erfolgreich
      */
-    bool init();
+    bool init(bool after_watchdog_reset);
 
     /**
      * @brief Hauptkontroll-Loop
@@ -60,6 +63,8 @@ private:
     ForceHAL* force2_ = nullptr;                        ///< Kraftsensor 2 (4x HX711, gemeinsamer Takt)
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
+    PersistentState persist_;                           ///< Zustand + Boot-Zaehler (EEPROM)
+    SdLogger sd_;                                       ///< Bordspeicher (SD-Karte)
 
     // -----------------------------------------------------------------------
     // Zustandsmaschine
@@ -148,6 +153,9 @@ private:
                          MotorAction action, int16_t arg, uint32_t& on_since_ms);
 
     void handleMotorTimeout(uint32_t now_ms);
+
+    /// true, solange einer der Motoren laeuft (dann keine SD-Zugriffe).
+    bool motorsRunning() const;
 
     /// Laufzeitbegrenzung eines einzelnen Motors (siehe MOTOR_ON_TIMEOUT_MS).
     void checkMotorTimeout(MotorHAL* motor, bool ready, const char* label,

@@ -66,6 +66,7 @@ enum class UplinkOpcode : uint8_t {
 
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH
+    STATE_RESET     = 0x12,   ///< ABORT verlassen -> PRE_LAUNCH (nur aus ABORT)
     ABORT           = 0x1F,   ///< Abbruch: Aktoren stoppen -> ABORT
 
     /// Kraftsensor nullen (Zellen muessen frei sein).

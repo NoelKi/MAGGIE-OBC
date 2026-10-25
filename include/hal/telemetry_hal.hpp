@@ -282,8 +282,19 @@ public:
      */
     void sendUplinkRaw(const uint8_t* bytes, uint8_t len);
 
+    /**
+     * @brief Mithoerer fuer gesendete Frames (z.B. der SD-Bordspeicher).
+     *
+     * Bekommt jedes Frame NACH dem Senden, byte-identisch. Aendert nichts an
+     * dem, was ueber die Leitung geht.
+     */
+    using FrameTap = void (*)(void* ctx, const uint8_t* frame, uint8_t len);
+    void setTap(FrameTap tap, void* ctx) { tap_ = tap; tap_ctx_ = ctx; }
+
 private:
     HardwareSerial& serial_;
+    FrameTap tap_     = nullptr;
+    void*    tap_ctx_ = nullptr;
     uint16_t counter_ = 0;
     bool initialized_ = false;
 

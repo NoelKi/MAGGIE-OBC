@@ -41,8 +41,8 @@ static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope (CS_GY
 //
 // Beide Pins haben auf der Teensy 4.1 einen QuadTimer3-Kanal (18 = Kanal 1,
 // 14 = Kanal 2), MotorHAL taktet sie also per analogWrite() in Hardware mit
-// 20 kHz - die Software-PWM (IntervalTimer, siehe motor_hal.hpp) greift hier
-// nicht.
+// 20 kHz. Ein Motorkanal MUSS auf einem PWM-faehigen Pin liegen, sonst meldet
+// MotorHAL::init() den Motor als nicht bereit.
 //
 // Kanal A ist die Vorwaertsrichtung: setSpeed(+x) legt die PWM auf A, B bleibt
 // LOW. Dreht der Motor verkehrt herum, die beiden Zeilen tauschen.

@@ -21,7 +21,7 @@ bool ForceHAL::init() {
     initialized_    = true;
     last_sample_ms_ = millis();
 
-    tare();
+    startTare();
     return true;
 }
 
@@ -91,11 +91,22 @@ void ForceHAL::shiftOut24(int32_t* out) {
 }
 
 bool ForceHAL::read(ForceReading& out) {
+    // Timeout des Nullabgleichs bei JEDEM Aufruf pruefen, nicht nur bei einem
+    // neuen Sample: Antwortet kein Wandler, kommt hier nie eines an.
+    if (tare_running_ && millis() - tare_start_ms_ >= tare_timeout_ms_) {
+        finishTare();
+    }
+
     if (!ready()) return false;
 
     int32_t raw[FORCE_MAX_CHANNELS];
     shiftOut24(raw);
     last_sample_ms_ = millis();
+
+    if (tare_running_) {
+        for (uint8_t i = 0; i < count_; i++) tare_sum_[i] += raw[i];
+        if (++tare_got_ >= tare_want_) finishTare();
+    }
 
     out.count = count_;
     for (uint8_t i = 0; i < count_; i++) {
@@ -109,36 +120,36 @@ bool ForceHAL::read(ForceReading& out) {
     return true;
 }
 
-bool ForceHAL::tare(uint8_t samples, uint32_t timeout_ms) {
+bool ForceHAL::startTare(uint8_t samples, uint32_t timeout_ms) {
     if (!initialized_) return false;
-    if (samples == 0) samples = 1;
+
+    tare_want_       = samples == 0 ? 1 : samples;
+    tare_got_        = 0;
+    tare_start_ms_   = millis();
+    tare_timeout_ms_ = timeout_ms;
+    for (uint8_t i = 0; i < FORCE_MAX_CHANNELS; i++) tare_sum_[i] = 0;
+    tare_done_    = false;
+    tare_running_ = true;
+    return true;
+}
+
+void ForceHAL::finishTare() {
+    tare_running_ = false;
+
+    if (tare_got_ == 0) {
+        // Kein Wandler hat geantwortet - alten Nullpunkt NICHT ueberschreiben.
+        tared_    = false;
+        tare_ok_  = false;
+        tare_done_ = true;
+        return;
+    }
 
     // int64 als Summe: 8 Samples x 24 Bit passen zwar auch in int32, aber der
     // Aufrufer darf samples erhoehen, ohne dass es hier still ueberlaeuft.
-    int64_t sum[FORCE_MAX_CHANNELS] = {};
-    uint8_t got = 0;
-
-    const uint32_t start = millis();
-    while (got < samples && millis() - start < timeout_ms) {
-        if (!ready()) continue;
-
-        int32_t raw[FORCE_MAX_CHANNELS];
-        shiftOut24(raw);
-        last_sample_ms_ = millis();
-
-        for (uint8_t i = 0; i < count_; i++) sum[i] += raw[i];
-        got++;
-    }
-
-    if (got == 0) {
-        // Kein Wandler hat geantwortet - alten Nullpunkt NICHT ueberschreiben.
-        tared_ = false;
-        return false;
-    }
-
     for (uint8_t i = 0; i < count_; i++) {
-        offset_[i] = static_cast<int32_t>(sum[i] / got);
+        offset_[i] = static_cast<int32_t>(tare_sum_[i] / tare_got_);
     }
-    tared_ = true;
-    return true;
+    tared_     = true;
+    tare_ok_   = true;
+    tare_done_ = true;
 }

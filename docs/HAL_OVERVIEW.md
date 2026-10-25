@@ -1,192 +1,110 @@
-/**
- * @file HAL_OVERVIEW.md
- * @brief Overview of all Hardware Abstraction Layer modules
- * 
- * This document provides a complete overview of the HAL structure
- * for the MAGGIE OBC (On-Board Computer) running on Teensy 4.1
- */
+# MAGGIE OBC – Firmware Overview
 
-# MAGGIE OBC - Hardware Abstraction Layer (HAL) Overview
+On-board computer firmware for the MAGGIE REXUS experiment, Teensy 4.1
+(PlatformIO, Arduino framework). This document describes the code as it is;
+the source of truth for pins is `include/pin_config.hpp`, for wire formats
+`include/hal/telemetry_hal.hpp` and `include/hal/uplink_hal.hpp`.
 
-## Module Structure
+## Structure
 
-### Core HAL Modules
-
-#### 1. **Force Sensor HAL** (`force_sensor_hal.hpp/cpp`)
-- **Purpose**: Interface for custom analog force sensors (3-axis)
-- **Pins Used**: 
-  - X-axis: PIN 30
-  - Y-axis: PIN 31
-  - Z-axis: PIN 32
-- **Features**:
-  - Analog input reading
-  - Offset calibration
-  - Direct force measurement conversion
-- **Data Structure**: `ForceSensorReading`
-
-#### 2. **Motor HAL** (`motor_hal.hpp/cpp`)
-- **Purpose**: PWM control for DRV8871 motor drivers
-- **Motors Supported**: 3 independent motors
-- **Motor Pins**:
-  - Motor 1: Pins 15 (A), 14 (B)
-  - Motor 2: Pins 23 (A), 22 (B)
-  - Motor 3: Pins 18 (A), 19 (B)
-- **Features**:
-  - Bidirectional speed control (-255 to +255)
-  - Individual motor instances
-  - PWM frequency configuration
-
-#### 3. **UART HAL** (`uart_hal.hpp/cpp`)
-- **Purpose**: Serial communication interface
-- **ARM Communication**: Pins 0 (TX), 1 (RX)
-- **Features**:
-  - Configurable baud rate
-  - Send/receive operations
-  - Data availability check
-
-#### 4. **Camera HAL** (`camera_hal.hpp/cpp`)
-- **Purpose**: Camera module communication via UART
-- **Camera Pins**:
-  - Camera 1: TX=7, RX=8 (UART2)
-  - Camera 2 (Backup): RX=24
-  - Camera 3: TX=25
-- **Features**:
-  - Individual camera control
-  - Command send/receive
-  - Image capture interface
-
-#### 5. **IMU HAL** (`imu_hal.hpp/cpp`)
-- **Purpose**: Accelerometer and Gyroscope interface
-- **Communication**: SPI
-- **Chip Select Pins**:
-  - Accelerometer: Pin 37
-  - Gyroscope: Pin 36
-- **SPI Pins**: MOSI=11, MISO=12, SCK=13
-- **Features**:
-  - 6-axis IMU data (3-axis accel + 3-axis gyro)
-  - Calibration support
-  - Self-test capability
-- **Data Structure**: `IMUReading`
-
-#### 6. **REXUS HAL** (`rexus_hal.hpp/cpp`)
-- **Purpose**: REXUS experiment signal interface
-- **Signal Pins**:
-  - L0_t (Launch): Pin 40
-  - SOE_i (Start of Experiment): Pin 39
-  - SODS_i (Start of Descent): Pin 38
-- **Features**:
-  - Launch detection
-  - Experiment phase tracking
-  - Descent detection
-
-#### 7. **Communication HAL** (`communication_hal.hpp/cpp`)
-- **Purpose**: Up/Down-link signal monitoring
-- **Signal Pins**:
-  - Uplink Plus: Pin 34
-  - Uplink Minus: Pin 35
-- **Features**:
-  - Uplink signal detection
-  - Differential signal reading
-
-### Supporting Files
-
-#### **Weight Sensor** (HX711 - Already Exists)
-- **Sensor**: Purchased scale with HX711 amplifier
-- **Pins**:
-  - DOUT: Pin 2 (mapped from PIN_FORCE_X_1)
-  - SCK: Pin 3 (mapped from PIN_FORCE_Y_1)
-
-#### **Sensor HAL Configuration** (`sensor_hal.hpp`)
-- Central configuration file
-- Maps all pin definitions to hardware interfaces
-- Includes all HAL module headers
-
-## System Integration
-
-### System Class (`system.hpp/cpp`)
-
-The `System` class integrates all HAL modules:
-
-```cpp
-class System {
-    WeightSensorDriver* weight_sensor_;    // HX711 weight
-    ForceSensorHAL* force_sensor_2_;       // Custom force sensor
-    
-    // Additional HAL instances would be added here:
-    // MotorHAL* motor_1_;
-    // MotorHAL* motor_2_;
-    // MotorHAL* motor_3_;
-    // IMUHAL* imu_;
-    // REXUSHAL* rexus_;
-    // CommunicationHAL* comm_;
-    // CameraHAL* camera_1_;
-    // CameraHAL* camera_2_;
-    // CameraHAL* camera_3_;
-};
+```
+src/main.cpp              setup()/loop(), hardware watchdog
+src/system.cpp            System: owns every module, runs the loop
+src/statemachine/         PRE_LAUNCH / TEST / ABORT
+src/hal/                  one file per hardware module (see below)
+src/hardwareTest/         standalone test sketches, excluded from the build
+include/                  headers, same layout; pin_config.hpp = all pins
 ```
 
-## Pin Mapping Summary
+`System` is the only class that talks to the modules. No module calls another,
+and the state machine knows no hardware: `System` reads inputs, asks the state
+machine, and drives the outputs.
 
-| Component | Pin | Function | HAL Module |
-|-----------|-----|----------|-----------|
-| ARM TX | 0 | UART1 TX | UART_HAL |
-| ARM RX | 1 | UART1 RX | UART_HAL |
-| HX711 DOUT | 2 | Weight Data | HX711 (existing) |
-| HX711 SCK | 3 | Weight Clock | HX711 (existing) |
-| Force X | 30 | Force X-axis | ForceSensorHAL |
-| Force Y | 31 | Force Y-axis | ForceSensorHAL |
-| Force Z | 32 | Force Z-axis | ForceSensorHAL |
-| Motor 1 A | 15 | Motor 1 Channel A | MotorHAL |
-| Motor 1 B | 14 | Motor 1 Channel B | MotorHAL |
-| Motor 2 A | 23 | Motor 2 Channel A | MotorHAL |
-| Motor 2 B | 22 | Motor 2 Channel B | MotorHAL |
-| Motor 3 A | 18 | Motor 3 Channel A | MotorHAL |
-| Motor 3 B | 19 | Motor 3 Channel B | MotorHAL |
-| Camera 1 TX | 7 | Camera 1 TX | CameraHAL |
-| Camera 1 RX | 8 | Camera 1 RX | CameraHAL |
-| Force CLK 2 | 9 | Force Sensor Control | (Reserved) |
-| Chip Select Force | 10 | Force CS | (Reserved) |
-| SPI MOSI | 11 | SPI Data Out | IMU_HAL |
-| SPI MISO | 12 | SPI Data In | IMU_HAL |
-| SPI SCK | 13 | SPI Clock | IMU_HAL |
-| CS Gyro | 36 | Gyroscope CS | IMU_HAL |
-| CS Accel | 37 | Accelerometer CS | IMU_HAL |
-| SODS_i | 38 | Descent Signal | REXUS_HAL |
-| SOE_i | 39 | Experiment Start | REXUS_HAL |
-| L0_t | 40 | Launch Signal | REXUS_HAL |
-| Uplink Minus | 35 | Downlink Signal - | Communication_HAL |
-| Uplink Plus | 34 | Downlink Signal + | Communication_HAL |
-| Camera 3 TX | 25 | Camera 3 TX | CameraHAL |
-| Camera Backup RX | 24 | Camera Backup RX | CameraHAL |
-| Temp CS | 26 | Temperature Sensor CS | (Reserved) |
+## Modules
 
-## Usage Example
+| Module | Hardware | Pins | Notes |
+|---|---|---|---|
+| `IMUHAL` | BMI088 (accel + gyro), SPI0 | CS accel 37, CS gyro 36, MOSI 11, MISO 12, SCK 13 | Chip IDs checked on every read; a dropout clears `IMU_VALID` |
+| `MotorHAL` ×2 | DRV8871 + quadrature encoder | M1: PWM 14/18, enc 5/6 · M2: PWM 15/23, enc 7/8 | Open loop, 20 kHz hardware PWM. Encoder is a sensor and end switch for `TURN`/`GOTO`, not a controller |
+| `ForceHAL` 1 | 3× HX711 (X, Y, Z), shared clock | DOUT 4, 3, 2 · CLK 27 | Own driver: all channels clocked in one pass. Tare runs in the background |
+| `ForceHAL` 2 | 4× HX711 (A, B, C, D), shared clock | DOUT 30, 31, 32, 41 · CLK 9 | Vector maths happens on the ground |
+| `UplinkReceiver` | Serial4 RX | 16 | 6-byte telecommand frame, CRC-8 |
+| `TelemetryDownlink` | Serial4 TX, 38400 baud | 17 | 20-byte frame, CRC-8, no ACK |
+| `REXUSHAL` | L0, SOE, SODS (open drain, active low) | 40, 39, 38 | Debounced, sent down as raw levels only. They trigger no transitions in this build |
 
-```cpp
-// Initialize system with all HAL modules
-System system;
-if (!system.init()) {
-    Serial.println("System initialization failed!");
-    return;
-}
+Up- and downlink share one UART (`Serial4`) to the REXUS service module (RXSM).
+USB `Serial` (115200) is for log output only.
 
-// Main loop - system handles periodic sensor reads
-while (true) {
-    system.run();
-    delay(10);
-}
+## Main loop
+
+Everything runs cooperatively from `System::run()`; there is no RTOS. The only
+interrupts are the encoder counters and the UART/USB drivers.
+
+| When | What | Downlink frame (MSGID1/MSGID2) |
+|---|---|---|
+| every loop | read all queued telecommands | – |
+| every loop | sample REXUS pins, update state machine | – |
+| every loop | motor `update()` (stop at target, end brake pulse), 30 s run-time limit | – |
+| every loop | poll both force sensors, send on each new sample (~10 Hz), or 1/s with `STALE` while a sensor hangs | `04/01`, `04/02` |
+| 50 ms | IMU accel + gyro | `01/01`, `01/02` |
+| 50 ms | motor 1 + 2 position, PWM, flags | `02/01`, `02/02` |
+| 1 s | state, subsystem bits, uptime, REXUS levels | `03/01` |
+| 1 s | uplink statistics, raw header of last uplink burst | `03/02`, `03/03` |
+
+Downlink load is about 55 % of 38400 baud. Serial4 has an extra 512-byte send
+buffer, so writes never wait on the UART.
+
+## State machine
+
+```
+reset ─► PRE_LAUNCH ──TEST_ENTER──► TEST
+             ▲  │                    │
+             └──┼────TEST_EXIT───────┘
+                │                    │
+                └──ABORT──► ABORT ◄──ABORT      (terminal, only a reset leaves)
 ```
 
-## Future Enhancements
+- Transitions come only from telecommands.
+- Leaving TEST (by `TEST_EXIT` or `ABORT`) turns both motors off.
+- State values on the wire are fixed: PRE_LAUNCH 0, ABORT 5, TEST 6. Values 1–4
+  are reserved for the planned flight sequence in `maggie_state_machine.puml`.
 
-- Actual IMU driver implementation (currently placeholder)
-- Temperature sensor HAL
-- Advanced SPI communication
-- Real hardware UART implementation for cameras
-- Motor speed feedback (encoder support)
-- Event-based architecture for REXUS signals
+## Telecommands
 
----
-Generated: MAGGIE OBC v1.6
-Author: Kieran Mai
-Date: 2026-05-14
+| Opcode | Command | Accepted in |
+|---|---|---|
+| `0x10` | TEST_ENTER | PRE_LAUNCH |
+| `0x11` | TEST_EXIT | TEST |
+| `0x1F` | ABORT | any |
+| `0x20` | FORCE_TARE (arg 0 = both, 1, 2) | any |
+| `0x00`, `0x08` | MOTOR_OFF, MOTOR2_OFF | any |
+| `0x01 0x05 0x06 0x07` | MOTOR_ON, ZERO, TURN, GOTO | TEST |
+| `0x09 0x0A 0x0B 0x0C` | MOTOR2_ON, ZERO, TURN, GOTO | TEST |
+
+Counterpart on the ground: `MAGGIE_SERVER/app/routes/command.py`.
+
+## Safety mechanisms
+
+- **Hardware watchdog** (WDOG1, 1 s). A hung loop resets the chip. After the
+  reset the motor pins are undriven (DRV8871 coasts) and the OBC starts in
+  PRE_LAUNCH with actuators locked. The ground sees the reset as uptime
+  dropping back.
+- **No blocking calls in the loop.** Force tare is spread over the loop;
+  downlink writes go into a buffer.
+- **Actuator lock.** Motor commands other than OFF only run in TEST.
+- **Motor run-time limit.** A motor that runs for 30 s without a new command is
+  stopped (`MOTOR_ON_TIMEOUT_MS`).
+- **Turn stall detection.** `TURN`/`GOTO` stop after 1 s without encoder
+  progress (150 ms near the target with soft approach).
+- **Degraded start.** A missing subsystem is never fatal. Its bit in the
+  subsystem byte stays 0, and `SYSTEM_HEALTHY` is set only when all subsystems
+  are up.
+- **Boot time.** About 0.4 s from reset to the first loop (300 ms USB
+  enumeration in the core, ~110 ms IMU init). There is no wait for the serial
+  monitor.
+
+## Hardware tests
+
+`src/hardwareTest/` holds standalone sketches for IMU, force and motor. Each
+defines its own `setup()`/`loop()`. To run one, enable it in
+`platformio.ini` (`build_src_filter`) and exclude `main.cpp`.

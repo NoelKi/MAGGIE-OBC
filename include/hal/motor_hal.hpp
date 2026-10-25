@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <Arduino.h>
-#include <IntervalTimer.h>
 #include <Encoder.h>
 
 /**
@@ -60,7 +59,7 @@ public:
 
     /**
      * @brief Initialize motor pins (open-loop)
-     * @return true if successful
+     * @return false, wenn einer der Kanaele auf einem Pin ohne Hardware-PWM liegt
      */
     bool init();
 
@@ -74,10 +73,10 @@ public:
 
     /**
      * @brief Set motor speed and direction
-     * @param speed -255 (full reverse) to +255 (full forward), 0 = stop
+     * @param speed -255 (full reverse) to +255 (full forward), 0 = coast
      *
-     * Betraege zwischen 1 und MIN_DRIVE_SPEED werden auf MIN_DRIVE_SPEED
-     * angehoben - darunter laeuft der Motor nicht an. 0 bleibt 0.
+     * Keine Untergrenze: Werte unter MIN_DRIVE_SPEED werden so ausgegeben
+     * (siehe motor_hal.cpp) - der Motor laeuft dann ggf. gar nicht an.
      */
     void setSpeed(int16_t speed);
 
@@ -107,29 +106,12 @@ public:
     int16_t getSpeed() const { return current_speed_; }
 
     /**
-     * @brief Set PWM frequency
-     * @param frequency Frequency in Hz
-     *
-     * Im Software-PWM-Modus (siehe usesSoftPwm) wird der Wert auf
-     * SOFT_PWM_HZ_MIN..SOFT_PWM_HZ_MAX begrenzt - 20 kHz sind per
-     * IntervalTimer nicht erreichbar.
-     */
-    void setPWMFrequency(uint32_t frequency);
-
-    /**
-     * @brief true, wenn dieser Motor per Software-PWM getaktet wird.
-     *
-     * Greift automatisch, sobald einer der beiden Kanaele auf einem Pin ohne
-     * PWM-Timer liegt (z.B. 40/41 auf der Teensy 4.1). Mit der aktuellen
-     * Belegung (18/19, beide QuadTimer) bleibt der Modus aus.
-     */
-    bool usesSoftPwm() const { return soft_pwm_; }
-
-    /**
      * @brief Hat dieser Teensy-4.1-Pin einen FlexPWM-/QuadTimer-Kanal?
      *
      * Auf Pins ohne Eintrag in pwm_pin_info[] kehrt analogWrite() wirkungslos
      * zurueck (cores/teensy4/pwm.c: `else { return; }`) - ohne Fehlermeldung.
+     * init() lehnt solche Pins deshalb ab, statt einen Motor zu melden, der
+     * sich nie drehen kann.
      */
     static bool pinHasHardwarePwm(uint8_t pin);
 
@@ -239,35 +221,7 @@ private:
     void updateTurn();   ///< Fahrt am Ziel abschalten
     void updateBrake();  ///< Bremsimpuls nach BRAKE_MS beenden
 
-    // -----------------------------------------------------------------------
-    // Software-PWM fuer Pins ohne Hardware-Timer
-    // -----------------------------------------------------------------------
-    // Ein IntervalTimer tickt SOFT_PWM_STEPS mal pro Periode und setzt die
-    // beiden Kanaele per digitalWrite. Die Statics gelten fuer EINEN Motor -
-    // aktuell wird auch nur Motor 1 instanziiert (system.cpp).
-    static constexpr uint32_t SOFT_PWM_STEPS  = 256;   ///< Aufloesung = analogWrite-Bereich
-    static constexpr uint32_t SOFT_PWM_HZ_DEF = 1000;  ///< Default-Traegerfrequenz
-    static constexpr uint32_t SOFT_PWM_HZ_MIN = 100;
-    static constexpr uint32_t SOFT_PWM_HZ_MAX = 2000;  ///< darueber wird die ISR-Last zu hoch
-    /// Interrupt-Prioritaet: hoeherer Wert = niedrigere Prioritaet. Muss unter
-    /// der des Encoders (Default 128) liegen, sonst gehen Quadratur-Flanken
-    /// verloren und die Positionsregelung driftet.
-    static constexpr uint8_t  SOFT_PWM_PRIORITY = 192;
-
-    bool soft_pwm_ = false;    ///< dieser Motor laeuft auf Software-PWM
-
-    static IntervalTimer   soft_timer_;
-    static volatile uint8_t soft_duty_a_;
-    static volatile uint8_t soft_duty_b_;
-    static volatile uint8_t soft_tick_;
-    static uint8_t soft_pin_a_;
-    static uint8_t soft_pin_b_;
-    static bool    soft_active_;
-
-    static void softPwmIsr();
-    void softPwmBegin(uint32_t frequency);
-
-    /** @brief Schreibt beide Kanaele - je nach Modus per analogWrite oder Soft-PWM. */
+    /** @brief Schreibt beide Kanaele per analogWrite. */
     void writeChannels(uint8_t duty_a, uint8_t duty_b);
 
     /// Geschwindigkeit fuer on() ohne Argument.

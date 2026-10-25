@@ -10,6 +10,14 @@
 #define SYS_TELEMETRY_INTERVAL_MS 1000  ///< Send SYS/STATE downlink every 1s (1 Hz)
 #define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial4, pins 16/17)
 
+// Zusaetzliche Serial4-Puffer. Der Core puffert nur 40 Byte Senden und 64 Byte
+// Empfang. Ein 50-ms-Takt schickt aber 80 Byte (IMU + 2x Motor), jede volle
+// Sekunde nochmals 60 - mit 40 Byte blockierte write() dann den Loop fuer
+// 10-20 ms. Bei ~55 % Auslastung der 38400 Baud faengt der grosse Puffer jeden
+// Burst ab: write() kehrt sofort zurueck, die Frames bleiben unveraendert.
+static uint8_t serial4_tx_extra[512];
+static uint8_t serial4_rx_extra[256];
+
 System::System() {
     // Konstruktor
 }
@@ -50,6 +58,8 @@ bool System::init() {
                   PIN_UPDOWNLINK_PLUS, PIN_UPDOWNLINK_MINUS);
     downlink_ = new TelemetryDownlink(Serial4);
     downlink_ready_ = downlink_->init(DOWNLINK_BAUDRATE);
+    Serial4.addMemoryForWrite(serial4_tx_extra, sizeof(serial4_tx_extra));
+    Serial4.addMemoryForRead(serial4_rx_extra, sizeof(serial4_rx_extra));   // Uplink
     if (downlink_ready_) {
         Serial.println("INFO  [System]: Downlink bereit (38400 Baud).");
     } else {
@@ -65,9 +75,8 @@ bool System::init() {
     motor_ready_ = motor_->init();
     if (motor_ready_) {
         motor_->initEncoder(PIN_M1_ENC_A, PIN_M1_ENC_B);
-        Serial.printf("INFO  [System]: Motor 1 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u, %s).\n",
-                      PIN_M1_A, PIN_M1_B, PIN_M1_ENC_A, PIN_M1_ENC_B,
-                      motor_->usesSoftPwm() ? "Software-PWM" : "Hardware-PWM");
+        Serial.printf("INFO  [System]: Motor 1 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
+                      PIN_M1_A, PIN_M1_B, PIN_M1_ENC_A, PIN_M1_ENC_B);
     } else {
         Serial.println("WARN  [System]: Motor 1 konnte nicht initialisiert werden.");
     }
@@ -81,9 +90,8 @@ bool System::init() {
     motor2_ready_ = motor2_->init();
     if (motor2_ready_) {
         motor2_->initEncoder(PIN_M2_ENC_A, PIN_M2_ENC_B);
-        Serial.printf("INFO  [System]: Motor 2 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u, %s).\n",
-                      PIN_M2_A, PIN_M2_B, PIN_M2_ENC_A, PIN_M2_ENC_B,
-                      motor2_->usesSoftPwm() ? "Software-PWM" : "Hardware-PWM");
+        Serial.printf("INFO  [System]: Motor 2 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
+                      PIN_M2_A, PIN_M2_B, PIN_M2_ENC_A, PIN_M2_ENC_B);
     } else {
         Serial.println("WARN  [System]: Motor 2 konnte nicht initialisiert werden.");
     }
@@ -93,19 +101,20 @@ bool System::init() {
     //   Sensor 1: 3 Zellen X/Y/Z
     //   Sensor 2: 4 Zellen A/B/C/D (Eigenbau, Verrechnung erst am Boden)
     //
-    // Der Nullabgleich laeuft in init() mit - die Zellen muessen dabei
-    // UNBELASTET sein. Schlaegt er fehl, laeuft der Sensor ohne Tara weiter
-    // und meldet das per DL_FORCE_TARED an die Bodenstation.
+    // Der Nullabgleich startet in init() und laeuft NICHT blockierend im Loop
+    // mit (siehe handleForceSensor) - die Zellen muessen dabei UNBELASTET sein.
+    // Schlaegt er fehl, laeuft der Sensor ohne Tara weiter und meldet das per
+    // DL_FORCE_TARED an die Bodenstation.
     // -----------------------------------------------------------------------
     Serial.println("INFO  [System]: Initialisiere Kraftsensor 1 (3x HX711, X/Y/Z)...");
     force1_ = new ForceHAL(PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK, FORCE1_TELE_DIV);
     force1_ready_ = force1_->init();
-    logForceSensor(force1_, "Kraftsensor 1", PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK);
+    Serial.println("INFO  [System]: Kraftsensor 1 - Nullabgleich laeuft im Hintergrund.");
 
     Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (4x HX711, A/B/C/D)...");
     force2_ = new ForceHAL(PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK, FORCE2_TELE_DIV);
     force2_ready_ = force2_->init();
-    logForceSensor(force2_, "Kraftsensor 2", PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK);
+    Serial.println("INFO  [System]: Kraftsensor 2 - Nullabgleich laeuft im Hintergrund.");
 
     // -----------------------------------------------------------------------
     // Uplink-Telecommand-Empfang (teilt sich Serial4 mit dem Downlink, Pin 16 RX)
@@ -132,15 +141,21 @@ bool System::init() {
     // Zusammenfassung. Der OBC startet auch dann, wenn einzelne Subsysteme
     // fehlen - system_healthy meldet den Zustand nur an die Bodenstation.
     // -----------------------------------------------------------------------
-    system_healthy = imu_ready_ && downlink_ready_ && motor_ready_;
+    system_healthy = imu_ready_ && downlink_ready_ && motor_ready_ && motor2_ready_ &&
+                     force1_ready_ && force2_ready_ && rexus_ready_;
 
     if (system_healthy) {
         Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
     } else {
-        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - IMU:%s Downlink:%s Motor:%s\n\n",
+        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - IMU:%s Downlink:%s "
+                      "Motor1:%s Motor2:%s Kraft1:%s Kraft2:%s REXUS:%s\n\n",
                       imu_ready_      ? "OK" : "FEHLT",
                       downlink_ready_ ? "OK" : "FEHLT",
-                      motor_ready_    ? "OK" : "FEHLT");
+                      motor_ready_    ? "OK" : "FEHLT",
+                      motor2_ready_   ? "OK" : "FEHLT",
+                      force1_ready_   ? "OK" : "FEHLT",
+                      force2_ready_   ? "OK" : "FEHLT",
+                      rexus_ready_    ? "OK" : "FEHLT");
     }
     return true;
 }
@@ -234,12 +249,15 @@ void System::logForceSensor(ForceHAL* hal, const char* label,
 }
 
 void System::handleForce() {
-    handleForceSensor(force1_, force1_ready_, DownlinkForceMsg::TARGET1, force1_state_);
-    handleForceSensor(force2_, force2_ready_, DownlinkForceMsg::TARGET2, force2_state_);
+    handleForceSensor(force1_, force1_ready_, DownlinkForceMsg::TARGET1, force1_state_,
+                      "Kraftsensor 1", PIN_FORCE1_DOUT, PIN_FORCE1_SCK);
+    handleForceSensor(force2_, force2_ready_, DownlinkForceMsg::TARGET2, force2_state_,
+                      "Kraftsensor 2", PIN_FORCE2_DOUT, PIN_FORCE2_SCK);
 }
 
 void System::handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
-                               ForceChannelState& state) {
+                               ForceChannelState& state, const char* label,
+                               const uint8_t* pins, uint8_t sck) {
     if (!ready || !hal) return;
 
     // read() kehrt ohne neue Wandlung sofort zurueck - der Aufruf jeden Loop
@@ -249,6 +267,13 @@ void System::handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
     // doppelt oder gar nicht sendet.
     const bool fresh = hal->read(state.last);
     const uint32_t now = millis();
+
+    // Ein im Hintergrund laufender Nullabgleich (Boot oder Telecommand) endet
+    // innerhalb von read(); das Ergebnis hier genau einmal protokollieren.
+    bool tare_ok = false;
+    if (hal->takeTareResult(tare_ok)) {
+        logForceSensor(hal, label, pins, hal->channels(), sck);
+    }
 
     if (!fresh) {
         // Kein neuer Messwert. Solange der Sensor normal wandelt, ist das der
@@ -283,19 +308,13 @@ void System::tareForceSensor(ForceHAL* hal, bool ready, const char* label) {
         return;
     }
 
-    Serial.printf("INFO  [System]: TC FORCE_TARE - %s nullen "
+    Serial.printf("INFO  [System]: TC FORCE_TARE - %s wird im Hintergrund genullt "
                   "(Zellen muessen unbelastet sein)\n", label);
-    if (!hal->tare()) {
-        Serial.printf("WARN  [System]: FORCE_TARE fuer %s fehlgeschlagen - "
-                      "Wandler antwortet nicht, alter Nullpunkt bleibt.\n", label);
-        return;
+    // Kehrt sofort zurueck - der Abgleich laeuft ueber die naechsten Loops, das
+    // Ergebnis wird in handleForceSensor() protokolliert.
+    if (!hal->startTare()) {
+        Serial.printf("WARN  [System]: FORCE_TARE fuer %s nicht gestartet.\n", label);
     }
-
-    Serial.printf("INFO  [System]: %s Nullpunkte:", label);
-    for (uint8_t i = 0; i < hal->channels(); i++) {
-        Serial.printf(" [%u]=%ld", i, static_cast<long>(hal->offset(i)));
-    }
-    Serial.println();
 }
 
 uint8_t System::subsystemBits() const {
@@ -358,9 +377,11 @@ void System::onStateChanged(MissionState previous, MissionState current) {
     (void)previous;
 
     // Aktoren stillsetzen, sobald der Freigabezustand (TEST) verlassen wird -
-    // insbesondere bei TEST_EXIT und bei einem ABORT.
-    if (!state_machine_.actuatorsUnlocked() && motor_ && motor_ready_) {
-        motor_->off();
+    // insbesondere bei TEST_EXIT und bei einem ABORT. BEIDE Motoren: Ein
+    // vergessener Motor liefe sonst bis zum Watchdog weiter.
+    if (!state_machine_.actuatorsUnlocked()) {
+        if (motor_  && motor_ready_)  motor_->off();
+        if (motor2_ && motor2_ready_) motor2_->off();
         Serial.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
                       StateMachine::toString(current));
     }
@@ -396,8 +417,8 @@ void System::handleUplink(uint32_t now_ms) {
                 // durch ein erneutes Tarieren jederzeit korrigieren.
                 //
                 // ARG waehlt den Sensor: 0 = beide, 1 = Sensor 1, 2 = Sensor 2.
-                // Beide dauern zusammen bis zu 2x TARE_TIMEOUT_MS - das ist
-                // hier vertretbar, weil in dieser Zeit nichts faehrt.
+                // Der Abgleich startet nur und laeuft im Hintergrund weiter - der
+                // Loop (Uplink, Motor-Watchdog, Telemetrie) wird nicht angehalten.
                 if (cmd.arg == 0 || cmd.arg == 1) {
                     tareForceSensor(force1_, force1_ready_, "Kraftsensor 1");
                 }
@@ -457,13 +478,6 @@ bool System::execMotorAction(MotorHAL* motor, bool ready, const char* label,
         case MotorAction::ON:
             Serial.printf("INFO  [System]: TC %s_ON (speed=%d)\n", label, arg);
             motor->on(arg);
-            // Sichtbar machen, wenn die Anlaufgrenze gegriffen hat - sonst
-            // wundert man sich am Boden ueber den abweichenden PWM-Istwert.
-            if (arg != 0 && motor->getSpeed() != arg) {
-                Serial.printf("WARN  [System]: PWM %d unter der Anlaufgrenze "
-                              "(%d) - auf %d angehoben.\n",
-                              arg, MotorHAL::MIN_DRIVE_SPEED, motor->getSpeed());
-            }
             on_since_ms = millis();
             return true;
         case MotorAction::TURN:

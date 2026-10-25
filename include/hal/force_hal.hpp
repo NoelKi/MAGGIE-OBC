@@ -150,13 +150,15 @@ public:
     ForceHAL(const uint8_t* dout_pins, uint8_t count, uint8_t pin_sck, int32_t tele_div);
 
     /**
-     * @brief Pins konfigurieren und Nullabgleich fahren.
+     * @brief Pins konfigurieren und den Nullabgleich STARTEN (nicht blockierend).
      *
-     * Die Zellen muessen dabei UNBELASTET sein - der gemessene Mittelwert wird
-     * zum Nullpunkt. Schlaegt der Abgleich fehl (kein Wandler antwortet),
-     * bleibt init() trotzdem erfolgreich: Der Sensor liefert dann rohe Counts
-     * ohne Tara, und tared() meldet false. So ist am Boden unterscheidbar
-     * "Sensor fehlt" von "Sensor da, aber nie genullt".
+     * Die Zellen muessen waehrend des Abgleichs UNBELASTET sein - der gemessene
+     * Mittelwert wird zum Nullpunkt. Der Abgleich laeuft im Hintergrund mit,
+     * waehrend read() im normalen Loop gepollt wird (siehe startTare()). Das
+     * Ergebnis meldet takeTareResult(). Antwortet kein Wandler, bleibt init()
+     * trotzdem erfolgreich: Der Sensor liefert dann rohe Counts ohne Tara, und
+     * tared() meldet false. So ist am Boden unterscheidbar "Sensor fehlt" von
+     * "Sensor da, aber nie genullt".
      *
      * @return true wenn die Pins gesetzt sind (also immer)
      */
@@ -174,6 +176,11 @@ public:
     /**
      * @brief Einen Satz aller Kanaele lesen - nicht blockierend.
      *
+     * Treibt zugleich einen laufenden Nullabgleich voran (siehe startTare()):
+     * Jedes hier eingelesene Sample geht in den Mittelwert, und das Timeout
+     * wird bei JEDEM Aufruf geprueft - auch wenn gar kein Wandler antwortet.
+     * Die Ausgabe nutzt waehrenddessen noch den alten Nullpunkt.
+     *
      * @param out wird nur bei Rueckgabe true beschrieben
      * @return false, wenn noch kein neuer Messwert ansteht (Normalfall im
      *         schnellen Loop) - dann einfach beim naechsten Durchlauf wieder
@@ -182,16 +189,35 @@ public:
     bool read(ForceReading& out);
 
     /**
-     * @brief Nullpunkt neu setzen (blockierend, bis TARE_TIMEOUT_MS).
+     * @brief Nullabgleich starten - kehrt SOFORT zurueck.
      *
-     * Blockiert bewusst: Ein Nullabgleich ueber mehrere Wandlungen laesst sich
-     * nicht sinnvoll in den Loop verteilen, und er passiert nur beim Booten
-     * oder auf Telecommand - nicht im Flug.
+     * Der Abgleich sammelt `samples` Wandlungen ueber mehrere read()-Aufrufe
+     * ein (bei 10 Hz ca. 0,8 s) und bricht nach `timeout_ms` ab. Er blockiert
+     * den Loop nie: Uplink, Zustandsmaschine, Motor-Watchdog und Telemetrie
+     * laufen waehrend des Abgleichs unveraendert weiter. Ein laufender
+     * Abgleich wird neu gestartet. Der alte Nullpunkt wird erst am Ende
+     * ueberschrieben, und nur bei Erfolg.
      *
-     * @return true, wenn mindestens ein Sample eingesammelt wurde
+     * @return false nur, wenn init() noch nicht gelaufen ist
      */
-    bool tare(uint8_t samples = TARE_SAMPLES,
-              uint32_t timeout_ms = TARE_TIMEOUT_MS);
+    bool startTare(uint8_t samples = TARE_SAMPLES,
+                   uint32_t timeout_ms = TARE_TIMEOUT_MS);
+
+    /** @brief Laeuft gerade ein Nullabgleich? */
+    bool tareRunning() const { return tare_running_; }
+
+    /**
+     * @brief Ergebnis eines beendeten Nullabgleichs abholen (einmalig).
+     *
+     * @param ok true, wenn mindestens ein Sample eingesammelt wurde
+     * @return true genau einmal pro beendetem Abgleich, sonst false
+     */
+    bool takeTareResult(bool& ok) {
+        if (!tare_done_) return false;
+        tare_done_ = false;
+        ok = tare_ok_;
+        return true;
+    }
 
     /** @brief Wurde je erfolgreich tariert? */
     bool tared() const { return tared_; }
@@ -224,6 +250,19 @@ private:
     int32_t offset_[FORCE_MAX_CHANNELS] = {};
 
     uint32_t last_sample_ms_ = 0;
+
+    // Zustand des nicht blockierenden Nullabgleichs (siehe startTare()).
+    bool     tare_running_ = false;
+    bool     tare_done_    = false;   ///< Ergebnis liegt zum Abholen bereit
+    bool     tare_ok_      = false;
+    uint8_t  tare_want_    = 0;
+    uint8_t  tare_got_     = 0;
+    uint32_t tare_start_ms_   = 0;
+    uint32_t tare_timeout_ms_ = 0;
+    int64_t  tare_sum_[FORCE_MAX_CHANNELS] = {};
+
+    /// Abgleich abschliessen: Nullpunkt uebernehmen (nur bei got > 0).
+    void finishTare();
 
     /**
      * @brief Die eigentliche Taktschleife: 24 Datenbits + 1 Gain-Impuls.

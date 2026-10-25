@@ -16,15 +16,15 @@
  * bewusst schlank gehalten und umfasst genau die Subsysteme, die auf dem
  * Testaufbau verbaut sind:
  *
- *   IMU (BMI088)        - Telemetrie in beiden Zustaenden
- *   Motor 1 + Encoder   - HDRM-Antrieb, per Telecommand nur im TEST-Zustand
- *   Kraftsensor 1       - 3x HX711 (X/Y/Z), Telemetrie in beiden Zustaenden
+ *   IMU (BMI088)        - Telemetrie in allen Zustaenden
+ *   Motor 1 + 2         - HDRM-Antriebe mit Encoder, per Telecommand nur in TEST
+ *   Kraftsensor 1       - 3x HX711 (X/Y/Z), Telemetrie in allen Zustaenden
  *   Kraftsensor 2       - 4x HX711 (A/B/C/D), Verrechnung erst am Boden
  *   Down-/Uplink        - Serial4 (Pin 16/17) zum REXUS-Servicemodul
  *   REXUS-Signale       - werden eingelesen und als Rohpegel heruntergefunkt
  *
- * Weitere Komponenten (Kameras, Kraftsensor 2, Temperatur, Roboterarm) kommen
- * Stueck fuer Stueck dazu, sobald sie am Aufbau haengen und getestet werden.
+ * Weitere Komponenten (Kameras, Temperatur, Roboterarm) kommen Stueck fuer
+ * Stueck dazu, sobald sie am Aufbau haengen und getestet werden.
  */
 
 class System {
@@ -125,9 +125,11 @@ private:
 
     /// Einen Kraftsensor pollen und bei neuem Messwert (oder Haenger) senden.
     void handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
-                           ForceChannelState& state);
+                           ForceChannelState& state, const char* label,
+                           const uint8_t* pins, uint8_t sck);
 
-    /// Einen Kraftsensor tarieren und das Ergebnis am Terminal protokollieren.
+    /// Nullabgleich eines Kraftsensors STARTEN (nicht blockierend). Das Ergebnis
+    /// protokolliert handleForceSensor(), sobald der Abgleich fertig ist.
     void tareForceSensor(ForceHAL* hal, bool ready, const char* label);
 
     /// Pins und Nullpunkte eines Kraftsensors ans USB-Terminal melden.

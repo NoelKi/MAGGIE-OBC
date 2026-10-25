@@ -190,14 +190,13 @@ bool IMUHAL::read(IMUReading& reading) {
     reading.raw_gyro_y = gy;
     reading.raw_gyro_z = gz;
 
+    // Chip-IDs bei JEDEM Lesen pruefen (4 SPI-Bytes, wenige us): Faellt der
+    // Sensor im Flug ab oder resettet er, liefert SPI sonst still 0xFF/0x00 -
+    // und das saehe am Boden aus wie echte Messwerte. So geht stattdessen
+    // DL_STATUS1_IMU_VALID auf 0.
     reading.timestamp = millis();
-    reading.valid = true;
+    reading.valid = selfTest();
     return true;
-}
-
-void IMUHAL::calibrate(uint16_t samples) {
-    if (!initialized_) return;
-    (void)samples;
 }
 
 bool IMUHAL::selfTest() {

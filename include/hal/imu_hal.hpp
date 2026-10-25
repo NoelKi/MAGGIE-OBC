@@ -30,7 +30,6 @@ public:
 
     bool init();
     bool read(IMUReading& reading);
-    void calibrate(uint16_t samples = 100);
     bool selfTest();
 
 private:

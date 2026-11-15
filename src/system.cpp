@@ -47,6 +47,9 @@ bool System::init(bool after_watchdog_reset) {
     startup_time = millis();
 
     printWelcomeBanner();
+    // Build-Stempel: Ein Teensy laesst sich nicht auslesen - nur so ist im
+    // Log erkennbar, welche Firmware tatsaechlich geflasht ist.
+    Serial.printf("INFO  [System]: Firmware-Build %s %s\n", __DATE__, __TIME__);
 
     // -----------------------------------------------------------------------
     // Nichtfluechtiger Speicher - zuerst, damit Boot-Nummer und letzter
@@ -98,6 +101,7 @@ bool System::init(bool after_watchdog_reset) {
     // Fehler hier sind NICHT fatal: das System laeuft ohne Motor weiter.
     // -----------------------------------------------------------------------
     Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder, sanfte Anfahrt)...");
+    MotorHAL::logDriveProfile();
     motor_ = new MotorHAL(PIN_M1_A, PIN_M1_B, 1, /*soft_approach=*/true);
     motor_ready_ = motor_->init();
     if (motor_ready_) {

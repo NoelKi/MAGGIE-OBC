@@ -14,6 +14,13 @@ bool MotorHAL::pinHasHardwarePwm(uint8_t pin) {
     return pin < 55;   // CORE_NUM_DIGITAL der Teensy 4.1
 }
 
+void MotorHAL::logDriveProfile() {
+    Serial.printf("INFO  [MotorHAL]: Fahrprofil (sanfte Anfahrt): Kick %d fuer %lu ms, "
+                  "Rampe quadratisch %d -> %d am Ziel.\n",
+                  KICK_SPEED, static_cast<unsigned long>(KICK_MS),
+                  RAMP_START_SPEED, SOFT_APPROACH_CRUISE_SPEED);
+}
+
 void MotorHAL::writeChannels(uint8_t duty_a, uint8_t duty_b) {
     analogWrite(pin_a_, duty_a);
     analogWrite(pin_b_, duty_b);
@@ -146,12 +153,14 @@ void MotorHAL::on(int16_t speed) {
     if (speed >  255) speed =  255;
     if (speed < -255) speed = -255;
     turning_ = false;          // Handbetrieb schlaegt eine laufende Drehung
+    kicking_ = false;
     is_on_   = true;
     setSpeed(speed);
 }
 
 void MotorHAL::off() {
     turning_ = false;
+    kicking_ = false;
     is_on_   = false;
     brake();
 }
@@ -212,8 +221,11 @@ void MotorHAL::startMove(long target, int16_t degrees, const char* kind) {
     breakaway_tries_ = 0;
     // Startet die Fahrt schon in der Anfahrzone, bedeutet Stillstand dort
     // "Anschlag erreicht" (siehe updateTurn) - dann kein Anlauf.
+    // Auch dann aber MIT Kick: Mit 140 kaeme der Motor sonst gar nicht los
+    // und die Fahrt endete sofort als "Anschlag erreicht".
     turn_moving_ = soft_approach_ && labs(target - start) <= SOFT_APPROACH_WINDOW_COUNTS;
-    if (!turn_moving_) startRunup(start);
+    if (turn_moving_) startForward();
+    else              startRunup(start);
 
     Serial.printf("INFO  [MotorHAL]: Fahrt %s %d Grad - Start %ld, Ziel %ld "
                   "(%ld Counts).\n",
@@ -230,7 +242,60 @@ void MotorHAL::startRunup(long pos) {
     running_up_      = true;
     runup_start_pos_ = pos;
     breakaway_ms_    = millis();
-    setSpeed(static_cast<int16_t>(-turn_dir_ * turn_cruise_));
+    kicking_         = false;
+    // Rueckwaerts ins Getriebespiel mit Kick-Drehzahl: Mit turn_cruise_ (140)
+    // liefe der Motor auch hier nicht los und der Anlauf haette keine Wirkung.
+    setSpeed(static_cast<int16_t>(-turn_dir_ * kickSpeed()));
+}
+
+void MotorHAL::startForward() {
+    const int16_t speed = kickSpeed();
+    kicking_       = speed > turn_cruise_;
+    kick_start_ms_ = millis();
+    ramp_from_pos_ = enc_->read();
+    setSpeed(static_cast<int16_t>(turn_dir_ * speed));
+}
+
+int16_t MotorHAL::rampSpeed(long pos) const {
+    const int16_t from = RAMP_START_SPEED;
+    if (from <= turn_cruise_) return turn_cruise_;   // keine Rampe (z. B. TURN_SPEED 220)
+
+    // Ueber den WEG, nicht ueber die Zeit: Die Rampe endet damit genau am
+    // Ziel, egal wie schnell der Motor unter der jeweiligen Last laeuft.
+    const long total = turn_dir_ * (turn_target_ - ramp_from_pos_);
+    if (total <= 0) return turn_cruise_;
+    long remaining = turn_dir_ * (turn_target_ - pos);
+    if (remaining < 0)     remaining = 0;
+    if (remaining > total) remaining = total;        // rueckwaerts (Getriebespiel)
+
+    // QUADRATISCH im Restweg r (1 = Start, 0 = Ziel): PWM = cruise + Hub * r^2.
+    // Faellt am Anfang steil und wird zum Ziel hin flach - der Motor ist also
+    // frueh langsam und laeuft das letzte Stueck nahe an turn_cruise_ an.
+    // Bei halbem Weg ist nur noch 1/4 des Hubs uebrig (linear waere es 1/2).
+    const float r = static_cast<float>(remaining) / static_cast<float>(total);
+    return static_cast<int16_t>(turn_cruise_ + (from - turn_cruise_) * r * r + 0.5f);
+}
+
+void MotorHAL::updateDriveSpeed(long pos) {
+    if (running_up_) return;   // Anlauf rueckwaerts faehrt fest mit kickSpeed()
+
+    if (kicking_) {
+        if (millis() - kick_start_ms_ < KICK_MS) return;
+        kicking_ = false;
+    }
+
+    int16_t speed = rampSpeed(pos);
+
+    // Anfahrzone: hoechstens SOFT_APPROACH_SPEED (weniger Aufprallenergie an
+    // einem Anschlag). Mit der Rampe auf 140 liegt der Wert dort ohnehin
+    // darunter - die Grenze greift nur bei schneller Fahrdrehzahl.
+    if (soft_approach_ && labs(turn_target_ - pos) <= SOFT_APPROACH_WINDOW_COUNTS &&
+        speed > SOFT_APPROACH_SPEED) {
+        speed = SOFT_APPROACH_SPEED;
+    }
+
+    // Nur bei Aenderung schreiben - sonst jeder Loop ein analogWrite().
+    if (abs(current_speed_) != speed) setSpeed(static_cast<int16_t>(turn_dir_ * speed));
 }
 
 bool MotorHAL::updateBreakaway(long pos) {
@@ -246,7 +311,7 @@ bool MotorHAL::updateBreakaway(long pos) {
         breakaway_ms_ = now;
         turn_ref_pos_ = pos;
         turn_ref_ms_  = now;
-        setSpeed(static_cast<int16_t>(turn_dir_ * turn_cruise_));
+        startForward();
         return true;
     }
 
@@ -282,6 +347,11 @@ bool MotorHAL::updateBreakaway(long pos) {
 void MotorHAL::updateTurn() {
     if (!turning_ || !enc_) return;
 
+    // PWM zuerst nachfuehren (Kick-Ende, Rampe): Auch solange updateBreakaway()
+    // noch auf die erste Bewegung wartet - sonst liefe die Anlaufphase komplett
+    // mit KICK_SPEED und die Erkennung saehe nie, ob die Rampe den Motor haelt.
+    updateDriveSpeed(enc_->read());
+
     // Bis zur ersten Bewegung uebernimmt das Losbrechen die Ueberwachung.
     if (!turn_moving_ && updateBreakaway(enc_->read())) return;
 
@@ -294,13 +364,7 @@ void MotorHAL::updateTurn() {
     const long remaining = labs(turn_target_ - pos);
     const bool in_window = soft_approach_ && remaining <= SOFT_APPROACH_WINDOW_COUNTS;
 
-    // Kurz vor dem Ziel auf SOFT_APPROACH_SPEED abbremsen - weniger
-    // Aufprallenergie an einem mechanischen Anschlag. Nur einmalig aufrufen
-    // (sonst schreibt writeChannels() bei jedem Loop unnoetig denselben Wert
-    // erneut).
-    if (in_window && abs(current_speed_) > SOFT_APPROACH_SPEED) {
-        setSpeed(forward ? SOFT_APPROACH_SPEED : static_cast<int16_t>(-SOFT_APPROACH_SPEED));
-    }
+    // (Abbremsen in der Anfahrzone passiert in updateDriveSpeed().)
 
     if (!reached) {
         // Fortschritt IN Fahrtrichtung. Faengt beide Ausfaelle ab, bei denen das

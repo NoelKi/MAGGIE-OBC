@@ -115,6 +115,10 @@ public:
      */
     static bool pinHasHardwarePwm(uint8_t pin);
 
+    /// Schreibt das Fahrprofil (Kick, Rampe) ins Boot-Log - zum Pruefen,
+    /// welche Kalibrierung auf dem Teensy laeuft.
+    static void logDriveProfile();
+
     // -----------------------------------------------------------------------
     // Encoder (reine Messung, siehe initEncoder)
     // -----------------------------------------------------------------------
@@ -237,6 +241,11 @@ private:
     uint8_t  breakaway_tries_  = 0;
     uint32_t breakaway_ms_     = 0;      ///< Beginn der aktuellen Phase
 
+    // Andrehimpuls, siehe KICK_* und startForward().
+    bool     kicking_       = false;  ///< Kick in Fahrtrichtung laeuft
+    uint32_t kick_start_ms_ = 0;
+    long     ramp_from_pos_ = 0;      ///< Position zu Beginn der Vorwaertsfahrt
+
     bool     braking_        = false;  ///< Bremsimpuls laeuft
     uint32_t brake_start_ms_ = 0;      ///< Beginn des Bremsimpulses
 
@@ -248,6 +257,14 @@ private:
     bool updateBreakaway(long pos);
     /// Anlauf beginnen: RUNUP_COUNTS rueckwaerts ins Getriebespiel.
     void startRunup(long pos);
+    /// In Fahrtrichtung losfahren - mit Kick, falls turn_cruise_ < KICK_SPEED.
+    void startForward();
+    /// PWM nachfuehren: Kick nach KICK_MS beenden, danach Rampe auf turn_cruise_.
+    void updateDriveSpeed(long pos);
+    /// Rampen-PWM an Position pos: RAMP_START_SPEED -> turn_cruise_ am Ziel.
+    int16_t rampSpeed(long pos) const;
+    /// PWM-Betrag fuer Anlauf/Kick: max(KICK_SPEED, turn_cruise_).
+    int16_t kickSpeed() const { return turn_cruise_ < KICK_SPEED ? KICK_SPEED : turn_cruise_; }
     void updateBrake();  ///< Bremsimpuls nach BRAKE_MS beenden
 
     /** @brief Schreibt beide Kanaele per analogWrite. */
@@ -330,17 +347,63 @@ private:
     // false, der Motor schaltet trotzdem sofort ab.
     //
     // SOFT_APPROACH_CRUISE_SPEED = 140 (Vorgabe 2026-11-15, vorher 255): Die
-    // Fahrt laeuft damit durchgehend mit 140 - LANGSAMER als
-    // SOFT_APPROACH_SPEED, das Abbremsen vor dem Ziel greift also nicht mehr.
-    // 140 liegt unter der lastfreien Anlaufschwelle von ~150 (siehe oben):
-    // Laeuft der Motor nicht an, versucht updateBreakaway() es dreimal und
-    // meldet dann turnFailed(). Bleibt er in der Anfahrzone stehen, gilt das
-    // als Anschlag erreicht (SOFT_APPROACH_STALL_MS) - die Fahrt endet dann
-    // vor dem Ziel, ohne Fehlermeldung. Gilt auch fuer die HDRM-Fahrten im Flug.
+    // Fahrt laeuft damit mit 140 - LANGSAMER als SOFT_APPROACH_SPEED, das
+    // Abbremsen vor dem Ziel greift also nicht mehr (die Anfahrzone faehrt mit
+    // dem kleineren der beiden Werte). 140 liegt unter der lastfreien
+    // Anlaufschwelle von ~150 (siehe oben) - aus dem Stand kommt der Motor
+    // damit nicht los, einmal drehend haelt er die Drehzahl aber. Deshalb
+    // startet jede Fahrt mit dem Andrehimpuls (KICK_*, siehe unten) und faehrt
+    // danach eine quadratische Rampe, die AM ZIEL bei 140 ankommt
+    // (RAMP_START_SPEED). Bleibt er in der Anfahrzone stehen, gilt
+    // das als Anschlag erreicht (SOFT_APPROACH_STALL_MS) - die Fahrt endet
+    // dann vor dem Ziel, ohne Fehlermeldung. Gilt auch fuer die HDRM-Fahrten
+    // im Flug.
     static constexpr long     SOFT_APPROACH_WINDOW_COUNTS = 300;  // ~24 Grad bei 4550 Counts/U
     static constexpr uint32_t SOFT_APPROACH_STALL_MS       = 150;
     static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 140;
     static constexpr int16_t  SOFT_APPROACH_SPEED          = 170;
+
+    // -----------------------------------------------------------------------
+    // Andrehimpuls (Kick) beim Anfahren
+    // -----------------------------------------------------------------------
+    // Liegt die Fahrdrehzahl (turn_cruise_) unter KICK_SPEED, laeuft eine
+    // Fahrt in drei Phasen (PWM-Verlauf ueber den Weg):
+    //
+    //   KICK_SPEED |##
+    //   RAMP_START |  '.
+    //              |    '.
+    //              |      ''-.
+    //   cruise 140 |          '''---......___ Ziel
+    //              +--------------------------> Weg
+    //               Kick  Rampe (quadratisch ueber den Weg)
+    //
+    // Grund: Haftreibung braucht deutlich mehr Moment als das Weiterdrehen.
+    // Die Rampe ist QUADRATISCH im Restweg r (PWM = 140 + Hub * r^2): Sie
+    // faellt am Anfang steil, der Motor ist frueh langsam und faehrt das
+    // letzte Stueck nahe 140 an (bei halbem Weg ist nur 1/4 des Hubs uebrig).
+    // Sie haengt am WEG, nicht an der Zeit - kommt also unabhaengig von Last
+    // und Drehzahl genau am Ziel bei 140 an. Die
+    // Fahrt endet am Ziel oder durch die Stillstandserkennung
+    // (TURN_STALL_MS bzw. SOFT_APPROACH_STALL_MS in der Anfahrzone).
+    //
+    // Der Kick gilt fuer den Anlauf rueckwaerts ins Getriebespiel (RUNUP_*)
+    // und fuer die ersten KICK_MS in Fahrtrichtung - auch bei jedem weiteren
+    // Anlaufversuch aus updateBreakaway(). Die Rampe beginnt jeweils neu ab der
+    // Position, an der die Vorwaertsfahrt startet.
+    //
+    // KALIBRIEREN am Aufbau:
+    //  - KICK_SPEED: so hoch, dass der Motor unter Last zuverlaessig losbricht.
+    //  - KICK_MS: so kurz wie moeglich - nur bis der Motor dreht. Muss
+    //    < BREAKAWAY_DETECT_MS bleiben, damit die Anlauf-Erkennung den Lauf
+    //    auf der Rampe mitbewertet.
+    //  - RAMP_START_SPEED: Rampenanfang direkt nach dem Kick. Hoeher = laengere
+    //    Strecke mit viel Moment, aber schnellere Fahrt. Bleibt der Motor kurz
+    //    vor dem Ziel stehen, diesen Wert erhoehen.
+    static constexpr int16_t  KICK_SPEED       = 255;
+    static constexpr uint32_t KICK_MS          = 60;
+    static constexpr int16_t  RAMP_START_SPEED = 220;
+    static_assert(KICK_MS < BREAKAWAY_DETECT_MS,
+                  "Kick muss vor Ende der Anlauf-Erkennung enden");
 
     /// Dauer des Bremsimpulses am Ende einer Fahrt. Lang genug, damit der
     /// Anker steht, kurz genug, dass die H-Bruecke danach wieder schlafen kann.

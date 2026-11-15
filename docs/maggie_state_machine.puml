@@ -1,0 +1,237 @@
+@startuml MAGGIE_RexusStateMachine
+' ============================================================
+'  MAGGIE — REXUS Experiment State Machine
+'  Gecko-Docking, Open-Loop, Microgravity-Fenster ~120 s
+'
+'  Editieren:
+'   - Zustände        : "state NAME <<phase>>" + Zeilen "NAME : text"
+'   - Phasen-Farben   : skinparam-Block unten (Stereotypen <<pre>>,
+'                       <<flight>>, <<exp>>, <<safe>>, <<abort>>)
+'   - Übergänge       : Source --> Target : "Bedingung"
+'   - Konstanten      : Note ganz unten (Single Source of Truth)
+'   - Layout breit    : "left to right direction" einkommentieren
+'
+'  Rendern:
+'   - VS Code   : Extension "PlantUML" (jebbs) + Java + Graphviz
+'   - Online    : https://www.plantuml.com/plantuml/uml
+'   - CLI       : plantuml maggie_state_machine.puml -tsvg
+' ============================================================
+
+title MAGGIE — REXUS Experiment State Machine
+
+' ' left to right direction
+
+' ---------- globales Styling ----------
+skinparam shadowing false
+skinparam roundCorner 12
+skinparam state {
+  FontName        "Helvetica"
+  FontSize        13
+  AttributeFontSize 11
+  BorderThickness 1.5
+  BackgroundColor White
+  BorderColor     #2563eb
+  ArrowColor      #111827
+  ArrowFontSize   11
+  ArrowFontColor  #111827
+}
+
+' ---------- Phasen-Farben über Stereotypen ----------
+skinparam state {
+  BorderColor<<pre>>      #6b7280
+  BorderColor<<flight>>   #2563eb
+  BorderColor<<exp>>      #16a34a
+  BorderColor<<safe>>     #0891b2
+  BorderColor<<abort>>    #dc2626
+  BackgroundColor<<abort>> #FEE2E2
+}
+
+[*] --> PRE_LAUNCH
+
+' ============================================================
+'  Pre-Flight
+' ============================================================
+state PRE_LAUNCH <<pre>>
+PRE_LAUNCH : S0 · Idle, Selbsttests
+PRE_LAUNCH : SODS aus
+
+state ARMED <<pre>>
+ARMED : S1 · Datalogger ein
+ARMED : Aktoren safe
+
+PRE_LAUNCH --> ARMED  : SODS = HIGH\n(T-600 s typ.)
+ARMED      --> ASCENT : LO = HIGH\n(T = 0 s)
+
+' ---------- Bodentest / Integration (nur am Boden erreichbar) ----------
+' Implementiert: statemachine/state_machine.hpp. Einziger Zustand, in dem
+' Aktor-Telecommands (Motor/HDRM) ausgefuehrt werden.
+state TEST <<pre>>
+TEST : S_T · Bodentest
+TEST : Aktoren per Telecommand frei,
+TEST : Telemetrie (IMU, Motor) laeuft
+
+PRE_LAUNCH --> TEST       : TC TEST_ENTER
+TEST       --> PRE_LAUNCH : TC TEST_EXIT
+TEST       --> ARMED      : SODS = HIGH\n(Flug schlaegt Bodentest)
+
+' ============================================================
+'  Flight
+' ============================================================
+state ASCENT <<flight>>
+ASCENT : S2 · Boost, Vibration
+ASCENT : Sensoren loggen
+
+' MG-Detektion: SOE und IMU sind gekoppelte, redundante Quellen.
+' Wer zuerst feuert, setzt t_µg vorläufig. Die andere Quelle muss
+' innerhalb T_xcheck bestätigen. IMU-Timestamp ist physikalisch
+' präziser und überschreibt t_µg, sobald IMU bestätigt.
+state MG_DETECT <<flight>>
+MG_DETECT : S3a · warte auf erste
+MG_DETECT : Quelle (SOE | IMU)
+
+state MG_CONFIRM <<flight>>
+MG_CONFIRM : S3b · Cross-Check
+MG_CONFIRM : warte auf zweite Quelle
+
+ASCENT     --> MG_DETECT  : t_seit_LO ≥ T_MG_EARLIEST\n(schützt vor Burnout-Spikes)
+MG_DETECT  --> MG_CONFIRM : SOE = HIGH  →  t_µg := t_SOE\n  ∨\n|a_imu| < IMU_g_thr für ≥ IMU_t_thr\n  →  t_µg := t_IMU
+MG_CONFIRM --> WAIT_FFU   : zweite Quelle\ninnerhalb T_xcheck\n→ mg_source = BOTH,\n   t_µg := t_IMU (präziser)
+MG_CONFIRM --> WAIT_FFU   : t > T_xcheck  ohne\nzweite Quelle\n→ mg_source = DEGRADED\n   (Warnflag, weiter)
+MG_DETECT  --> ABORT      : t_seit_LO > T_MG_ABORT\n(keine Quelle erkannt)
+
+' ============================================================
+'  Experiment
+' ============================================================
+state WAIT_FFU <<exp>>
+WAIT_FFU : S4 · Timer ab SOE
+WAIT_FFU : (FFU-Abwurf abwarten)
+
+state HDRMS_OPEN <<exp>>
+HDRMS_OPEN : S5 · Aktuator (Motoren)
+HDRMS_OPEN : löst aus
+ 
+state ARM_DEPLOY <<exp>>
+ARM_DEPLOY : S6 · Start
+ARM_DEPLOY : home → pre-approach
+
+WAIT_FFU    --> HDRMS_OPEN   : (t − t_µg) ≥ T_FFU
+HDRMS_OPEN   --> ARM_DEPLOY  : hdrm_open_sw\n∨ t > 3 s
+ARM_DEPLOY  --> APPROACH_T1 : ‖q - q_pre‖ < ε\n∧ arm_state = READY
+
+' ---------- Docking-Zyklus Target 1 ----------
+state "Docking Target 1" as Dock1 {
+  state APPROACH_T1 <<exp>>
+  APPROACH_T1 : S7 · Open-loop
+  APPROACH_T1 : Trajektorie T1
+
+  state SUCCESS_T1 <<exp>>
+  SUCCESS_T1 : S8 · Erfolg
+  SUCCESS_T1 : Wegezelle + Timer
+
+  APPROACH_T1 --> SUCCESS_T1 : t_hold ≥ X s\n(X = t(script_1) + margin)
+}
+
+SUCCESS_T1 --> APPROACH_T2 : ‖q - q_pre‖ < ε\n∧ F_load_T1 ≈ 0
+
+' ---------- Docking-Zyklus Target 2 ----------
+state "Docking Target 2" as Dock2 {
+  state APPROACH_T2 <<exp>>
+  APPROACH_T2 : S10 · Open-loop
+  APPROACH_T2 : Trajektorie T2
+
+  state SUCCESS_T2 <<exp>>
+  SUCCESS_T2 : S11 · Erfolg
+  SUCCESS_T2 : Wegezelle + Timer
+
+  APPROACH_T2 --> SUCCESS_T2 : t_hold ≥ Y s\n(Y = t(script_2) + margin)
+}
+
+SUCCESS_T2 --> ARM_STOW : ‖q - q_pre‖ < ε\n∧ F_load_T2 ≈ 0
+
+' ============================================================
+'  Safing
+' ============================================================
+state "Stowing Arm" as Stow1 {
+  state ARM_STOW <<safe>>
+  ARM_STOW : S13 · Arm in
+  ARM_STOW : HDRM-Konfiguration
+
+  state SUCCESS_STOW <<exp>>
+  SUCCESS_STOW : S11 · Erfolg
+  SUCCESS_STOW : Wegezelle + Timer
+
+  ARM_STOW --> SUCCESS_STOW : t_hold ≥ Y s\n(Y = t(script_stow) + margin)
+}
+state HDRM_CLOSE <<safe>>
+HDRM_CLOSE : S14 · Mechanismus
+HDRM_CLOSE : schließt um Arm
+
+state NET_DEPLOY <<safe>>
+NET_DEPLOY : S15 · Redundantes
+NET_DEPLOY : Sicherungsnetz
+
+state SAFE <<safe>>
+SAFE : S16 · Telemetrie weiter
+SAFE : Aktoren aus
+
+SUCCESS_STOW --> HDRM_CLOSE : ‖q - q_stow‖ < ε\n∧ arm idle
+HDRM_CLOSE --> NET_DEPLOY : hdrm_closed_sw\n∨ t > 3 s
+NET_DEPLOY --> SAFE       : net_deployed_sw\n∨ t > 2 s
+SAFE       --> [*]
+
+' ============================================================
+'  Abort-Pfad — erreichbar aus jedem Zustand
+' ============================================================
+state ABORT <<abort>>
+ABORT : S_E · Arm stop, HDRM zu wenn möglich,
+ABORT : Netz immer auslösen, Daten weiter loggen
+
+HDRMS_OPEN    -[#dc2626,dashed]-> ABORT : hdrm_open_sw fail\n∨ Power-Brownout
+ARM_DEPLOY   -[#dc2626,dashed]-> ABORT : arm_state = ERROR
+APPROACH_T1  -[#dc2626,dashed]-> ABORT : F_load > F_max\n∨ arm error
+SUCCESS_T1      -[#dc2626,dashed]-> ABORT : F_load > F_max
+APPROACH_T2  -[#dc2626,dashed]-> ABORT : F_load > F_max\n∨ arm error
+SUCCESS_T2      -[#dc2626,dashed]-> ABORT : F_load > F_max
+HDRMS_CLOSE   -[#dc2626,dashed]-> ABORT : hdrm_closed_sw fail
+ABORT        -[#dc2626]->        SAFE  : Safing-Sequenz fertig
+
+note right of ABORT
+  **Globale Trigger** (gelten in jedem Zustand):
+  • Watchdog timeout
+  • Power-Brownout
+  • Operator-Abort (Uplink)
+  • Force-Überschreitung (F_load > F_max)
+  • Harter Cutoff:  t > T_HARD_CUT
+end note
+
+' ============================================================
+'  Konfiguration / Konstanten  (Single Source of Truth)
+' ============================================================
+note bottom of SAFE
+  **KONFIG — Konstanten (im Code als Parameter):**
+  // — Microgravity-Detektion (SOE × IMU gekoppelt)
+  T_MG_EARLIEST = 60 s         (frühester MG-Detect ab LO)
+  T_MG_ABORT    = 120 s        (kein MG → Abort, ab LO)
+  T_xcheck      = 5 s          (Cross-Check-Fenster SOE↔IMU)
+  IMU_g_thr     = 0.05 g       (Microgravity-Schwelle)
+
+  // — Experiment-Sequenz (alles relativ zu t_µg)
+  T_FFU         = 10 s         (Wartezeit ab t_µg bis HDRMS_OPEN)
+  T_HARD_CUT    = t_µg + 100 s (Erzwungener Übergang nach ARM_STOW)
+  // — Docking
+  F_thresh      = 0.2 N        (Kontakt-Erkennung Wegezelle)
+  F_max         = 5 N        (Force-Limit → Abort)
+  t_hold        = 3 s          (Halte-Zeit im DOCK)
+
+  // — Telemetrie-Flag
+  mg_source ∈ {SOE_ONLY, IMU_ONLY, BOTH, DEGRADED}
+
+  **Phasen-Farben:**
+  · Pre-Flight = grau 
+  · Flight = blau 
+  · Experiment = grün
+  · Safing = cyan
+  · Abort = rot (gestrichelt) 
+end note
+
+@enduml

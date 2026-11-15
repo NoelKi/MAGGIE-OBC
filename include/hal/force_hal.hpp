@@ -55,9 +55,12 @@
 /// und haelt ForceReading klein genug, um sie per Wert zu reichen.
 static constexpr uint8_t FORCE_MAX_CHANNELS = 4;
 
-/// Wandlungsrate des HX711 mit RATE-Pin auf LOW. Bestimmt, wie oft read()
-/// ueberhaupt einen neuen Wert liefern kann.
-static constexpr uint32_t FORCE_SAMPLE_RATE_HZ = 10;
+/// Wandlungsrate des HX711: RATE-Pin auf VCC = 80 Hz, auf GND = 10 Hz
+/// (Hardware, auf der Platine). Nur zur Dokumentation - die Firmware sendet
+/// jede Wandlung sofort und funktioniert mit beiden Raten. ALLE Wandler einer
+/// Gruppe muessen gleich eingestellt sein, sonst laeuft die Gruppe im Takt
+/// des langsamsten.
+static constexpr uint32_t FORCE_SAMPLE_RATE_HZ = 80;
 
 /**
  * @brief Teiler zwischen tarierten Counts und dem int16 des Downlinks.

@@ -11,8 +11,10 @@ static constexpr uint8_t ACC_SOFTRESET   = 0x7E;
 
 static constexpr uint8_t ACC_CHIP_ID_VAL = 0x1E;
 static constexpr uint8_t ACC_RANGE_3G    = 0x00;
-// ODR 100Hz, normal bandwidth
-static constexpr uint8_t ACC_CONF_VAL    = 0xA8;
+// ODR 400 Hz, OSR4 (Tiefpass ~40 Hz). Gelesen wird mit 100 Hz (data_rates.hpp):
+// Der Sensor liefert so immer einen frischen, gegen Aliasing gefilterten Wert,
+// statt gegen den eigenen 100-Hz-Takt zu schweben (doppelte/fehlende Samples).
+static constexpr uint8_t ACC_CONF_VAL    = 0x8A;
 
 // BMI088 Gyroscope registers
 static constexpr uint8_t GYR_CHIP_ID     = 0x00;
@@ -24,8 +26,8 @@ static constexpr uint8_t GYR_SOFTRESET   = 0x14;
 
 static constexpr uint8_t GYR_CHIP_ID_VAL  = 0x0F;
 static constexpr uint8_t GYR_RANGE_500DPS = 0x02;
-// 100Hz ODR, 32Hz filter
-static constexpr uint8_t GYR_BW_VAL       = 0x07;
+// ODR 400 Hz, Filter 47 Hz - gleiche Begruendung wie ACC_CONF_VAL
+static constexpr uint8_t GYR_BW_VAL       = 0x03;
 
 // Scale factors
 static constexpr float ACCEL_SCALE = 1.0f / 10920.0f * 9.80665f; // ±3g → m/s²

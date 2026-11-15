@@ -10,6 +10,8 @@
 #include "storage/persistent_state.hpp"
 #include "storage/sd_logger.hpp"
 #include "pin_config.hpp"
+#include "mission_timeline.hpp"
+#include "data_rates.hpp"
 
 /**
  * @brief Zentrale System-Klasse
@@ -69,11 +71,26 @@ private:
     // -----------------------------------------------------------------------
     // Zustandsmaschine
     // -----------------------------------------------------------------------
-    StateMachine state_machine_;                        ///< PRE_LAUNCH/TEST/ABORT
+    StateMachine state_machine_;                        ///< Boden- und Flugzustaende
     MissionState last_state_ = MissionState::PRE_LAUNCH; ///< für die Zustandswechsel-Erkennung
-    bool abort_requested_ = false;                       ///< gelatchter Abbruch per Telecommand
 
-    uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten Telemetrie-Downlinks
+    // -----------------------------------------------------------------------
+    // Flugablauf (Zeiten: mission_timeline.hpp)
+    // -----------------------------------------------------------------------
+    uint8_t  flight_flags_      = 0;   ///< FLIGHT_*-Bits, gespiegelt im EEPROM
+    uint16_t last_checkpoint_s_ = 0;   ///< zuletzt gesicherte Flugzeit in s
+
+    /// Eine geplante HDRM-Fahrt. HDRM 2 startet HDRM_STAGGER_MS nach HDRM 1.
+    struct HdrmMove {
+        bool     pending = false;
+        uint32_t due_ms  = 0;
+        int16_t  degrees = 0;
+    };
+    HdrmMove hdrm_move_[2];            ///< [0] = HDRM 1 (motor_), [1] = HDRM 2 (motor2_)
+
+    uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten IMU-Frames
+    uint32_t last_motor_telemetry_ms_ = 0;  ///< Zeitstempel der letzten Motor-Frames
+    uint8_t  last_event_signals_ = 0;       ///< REXUS-Signale beim letzten Ereignis-Frame
     uint32_t last_sys_telemetry_ms_ = 0;    ///< Zeitstempel des letzten SYS/STATE-Downlinks
 
     // -----------------------------------------------------------------------
@@ -142,7 +159,34 @@ private:
                                const uint8_t* pins, uint8_t count, uint8_t sck);
     void handleSystemTelemetry(uint32_t now_ms);
     void handleStateMachine(uint32_t now_ms);
-    void onStateChanged(MissionState previous, MissionState current);
+    /// Zustandswechsel seit dem letzten Aufruf uebernehmen (Speichern,
+    /// Motoren, Meldung). Aus Telecommands UND aus update().
+    void commitStateChange(uint32_t now_ms);
+    /// Zustand/Signale melden: Ereignis-Frame (SD) + sofortiges SYS-Frame.
+    void reportChange(MissionState previous, uint32_t now_ms);
+    void onStateChanged(MissionState previous, MissionState current, uint32_t now_ms);
+
+    /// Telecommand im aktuellen Zustand zulaessig? (Flug: keiner, siehe .cpp)
+    bool commandAllowed(UplinkOpcode op) const;
+
+    /// Aktionen des Flugablaufs: HDRM-Fahrten, Roboterarm, Motorsperre.
+    void handleFlight(uint32_t now_ms);
+    /// Beide HDRM-Fahrten einplanen (HDRM 2 um HDRM_STAGGER_MS versetzt).
+    void scheduleHdrmMoves(uint32_t now_ms, int16_t degrees);
+    /// Schliessen fuer DESCENT einplanen, falls die HDRMs geoeffnet wurden.
+    void planDescent(uint32_t now_ms);
+    /// Ereignis-Frame (nur SD) mit aktuellem Zustand und Signalen schreiben.
+    void logStateEvent(MissionState previous, uint8_t prev_signals, uint32_t now_ms);
+    /// FLIGHT_IGNORE_*-Bits in die Bitlage DL_REXUS_* umrechnen.
+    static uint8_t eventSignals(uint8_t flight_bits);
+    /// Aktuell anliegende REXUS-Signale als FLIGHT_IGNORE_*-Bits.
+    uint8_t currentSignalBits() const;
+    /// Sind beide Oeffnungsfahrten begonnen UND beendet?
+    bool hdrmsOpenDone() const;
+    /// Platzhalter: Roboterarm-Bewegungen in ROBOT_ARM.
+    void robotArmStep(uint32_t t_ms);
+    /// Flugzeit jede volle Sekunde ins EEPROM (nur bei stehenden Motoren).
+    void updateCheckpoint(uint32_t now_ms);
     void handleUplink(uint32_t now_ms);
     bool handleMotorCommand(const UplinkCommand& cmd);
 

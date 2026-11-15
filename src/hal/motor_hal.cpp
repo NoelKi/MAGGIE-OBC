@@ -67,6 +67,7 @@ void MotorHAL::setSpeed(int16_t speed) {
     // MOTOR_ON_TIMEOUT_MS (System) auf max. 30 s begrenzt.
     current_speed_ = speed;
     braking_ = false;          // ein neuer Fahrbefehl beendet die Bremsphase
+    locked_  = false;          // analogWrite holt die Pins vom GPIO zurueck auf PWM
 
     if (speed > 0) {
         // Forward: Channel A active, Channel B off (DRV8871 Table 1: 1/0)
@@ -95,6 +96,25 @@ void MotorHAL::brake() {
     current_speed_  = 0;
     braking_        = true;
     brake_start_ms_ = millis();
+    locked_         = false;
+}
+
+void MotorHAL::lock() {
+    if (!initialized_) return;
+
+    turning_       = false;
+    is_on_         = false;
+    braking_       = false;   // sonst schaltet updateBrake() nach BRAKE_MS auf Coast
+    current_speed_ = 0;
+
+    // Per digitalWrite statt analogWrite(255): Bei 8 Bit bleibt mit 255 ein
+    // kurzer LOW-Puls je PWM-Periode. pinMode schaltet den Pin vom PWM-Timer
+    // zurueck auf GPIO; der naechste analogWrite() holt ihn wieder.
+    pinMode(pin_a_, OUTPUT);
+    pinMode(pin_b_, OUTPUT);
+    digitalWrite(pin_a_, HIGH);
+    digitalWrite(pin_b_, HIGH);
+    locked_ = true;
 }
 
 void MotorHAL::updateBrake() {
@@ -187,6 +207,14 @@ void MotorHAL::startMove(long target, int16_t degrees, const char* kind) {
     turn_failed_   = false;
     turning_       = true;
 
+    turn_dir_        = target > start ? 1 : -1;
+    turn_cruise_     = cruise;
+    breakaway_tries_ = 0;
+    // Startet die Fahrt schon in der Anfahrzone, bedeutet Stillstand dort
+    // "Anschlag erreicht" (siehe updateTurn) - dann kein Anlauf.
+    turn_moving_ = soft_approach_ && labs(target - start) <= SOFT_APPROACH_WINDOW_COUNTS;
+    if (!turn_moving_) startRunup(start);
+
     Serial.printf("INFO  [MotorHAL]: Fahrt %s %d Grad - Start %ld, Ziel %ld "
                   "(%ld Counts).\n",
                   kind, degrees, turn_start_, turn_target_, target - start);
@@ -197,8 +225,65 @@ void MotorHAL::update() {
     updateBrake();
 }
 
+void MotorHAL::startRunup(long pos) {
+    breakaway_tries_++;
+    running_up_      = true;
+    runup_start_pos_ = pos;
+    breakaway_ms_    = millis();
+    setSpeed(static_cast<int16_t>(-turn_dir_ * turn_cruise_));
+}
+
+bool MotorHAL::updateBreakaway(long pos) {
+    const uint32_t now = millis();
+
+    // Anlauf rueckwaerts: bis RUNUP_COUNTS geschafft sind - oder RUNUP_MAX_MS
+    // um sind (dann steht er rueckwaerts an einem Anschlag). Danach in
+    // Fahrtrichtung und die Fortschrittsmessung neu beginnen.
+    if (running_up_) {
+        const long back = -turn_dir_ * (pos - runup_start_pos_);
+        if (back < RUNUP_COUNTS && now - breakaway_ms_ < RUNUP_MAX_MS) return true;
+        running_up_   = false;
+        breakaway_ms_ = now;
+        turn_ref_pos_ = pos;
+        turn_ref_ms_  = now;
+        setSpeed(static_cast<int16_t>(turn_dir_ * turn_cruise_));
+        return true;
+    }
+
+    // Bewegt er sich in Fahrtrichtung? Dann ab hier die normale Ueberwachung.
+    if (turn_dir_ * (pos - turn_ref_pos_) >= TURN_MIN_COUNTS) {
+        turn_moving_ = true;
+        if (breakaway_tries_ > 1) {
+            Serial.printf("INFO  [MotorHAL]: Motor %u erst im %u. Anlauf losgekommen.\n",
+                          motor_id_, breakaway_tries_);
+        }
+        return false;
+    }
+
+    if (now - breakaway_ms_ < BREAKAWAY_DETECT_MS) return true;
+
+    if (breakaway_tries_ >= BREAKAWAY_TRIES) {
+        off();
+        turn_failed_ = true;
+        Serial.printf("WARN  [MotorHAL]: Motor %u laeuft nicht an - %u Anlaeufe ohne "
+                      "Erfolg, Fahrt abgebrochen (Position %ld, Ziel %ld).\n",
+                      motor_id_, BREAKAWAY_TRIES, pos, turn_target_);
+        Serial.println("WARN  [MotorHAL]: Mechanik fest, Strombegrenzung (ILIM) zu "
+                       "niedrig, Versorgung bricht ein, oder Encoder zaehlt nicht.");
+        return true;
+    }
+
+    Serial.printf("INFO  [MotorHAL]: Motor %u steht - Anlauf %u/%u.\n",
+                  motor_id_, breakaway_tries_ + 1, BREAKAWAY_TRIES);
+    startRunup(pos);
+    return true;
+}
+
 void MotorHAL::updateTurn() {
     if (!turning_ || !enc_) return;
+
+    // Bis zur ersten Bewegung uebernimmt das Losbrechen die Ueberwachung.
+    if (!turn_moving_ && updateBreakaway(enc_->read())) return;
 
     // Vergleich in Fahrtrichtung, nicht ueber den Betrag: Ein simples
     // labs(pos - target) <= Toleranz wuerde bei zu grosser Schrittweite

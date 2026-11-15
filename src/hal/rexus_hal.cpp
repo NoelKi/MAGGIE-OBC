@@ -70,17 +70,17 @@ uint8_t REXUSHAL::rawBits() const {
 }
 
 // Die Leser liefern den ENTPRELLTEN Pegel - Quelle ist update(), nicht der Pin.
-bool REXUSHAL::readL0T() {
+bool REXUSHAL::readL0T() const {
     if (!initialized_) return false;
     return asserted(l0_.stable);
 }
 
-bool REXUSHAL::readSOE() {
+bool REXUSHAL::readSOE() const {
     if (!initialized_) return false;
     return asserted(soe_.stable);
 }
 
-bool REXUSHAL::readSODS() {
+bool REXUSHAL::readSODS() const {
     if (!initialized_) return false;
     return asserted(sods_.stable);
 }

@@ -24,12 +24,12 @@ public:
     /**
      * @brief Wie lange ein Pegel stabil anliegen muss, bevor er als Signal gilt.
      *
-     * Die Zustandsmaschine rastet auf diesen Signalen unumkehrbar ein
-     * (PRE_LAUNCH --SODS--> ARMED). Ohne Entprellung genuegt EIN einzelner
-     * verrauschter Sample-Zeitpunkt auf einer offenen Leitung, um die
-     * Flugsequenz auszuloesen - am Bodenaufbau passiert das binnen Sekunden.
+     * Die Zustandsmaschine rastet auf diesen Signalen unumkehrbar ein - LO
+     * und SOE starten den Flug aus JEDEM Bodenzustand. Ein Stoerimpuls darf
+     * das nicht ausloesen; ein echtes REXUS-Signal liegt dagegen dauerhaft an.
+     * 200 ms filtern Einkopplungen sicher weg und verzoegern den Ablauf kaum.
      */
-    static constexpr uint32_t SIGNAL_STABLE_MS = 50;
+    static constexpr uint32_t SIGNAL_STABLE_MS = 200;
 
     /**
      * @brief Constructor for REXUS HAL
@@ -66,19 +66,19 @@ public:
      * @brief Read L0_t signal
      * @return true if signal is active
      */
-    bool readL0T();
+    bool readL0T() const;
     
     /**
      * @brief Read SOE_i signal
      * @return true if signal is active
      */
-    bool readSOE();
+    bool readSOE() const;
     
     /**
      * @brief Read SODS_i signal
      * @return true if signal is active
      */
-    bool readSODS();
+    bool readSODS() const;
     
     /**
      * @brief Get all signal states

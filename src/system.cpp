@@ -6,9 +6,7 @@
 // ===========================================================================
 // Intervalle (in Millisekunden)
 // ===========================================================================
-#define TELEMETRY_INTERVAL_MS 50        ///< Send IMU/Motor downlink every 50ms (20 Hz)
-#define SYS_TELEMETRY_INTERVAL_MS 1000  ///< Send SYS/STATE downlink every 1s (1 Hz)
-#define DOWNLINK_BAUDRATE 38400         ///< Downlink UART speed (Serial4, pins 16/17)
+// Datenraten und Baudrate: include/data_rates.hpp
 
 // Zusaetzliche Serial4-Puffer. Der Core puffert nur 40 Byte Senden und 64 Byte
 // Empfang. Ein 50-ms-Takt schickt aber 80 Byte (IMU + 2x Motor), jede volle
@@ -66,7 +64,7 @@ bool System::init(bool after_watchdog_reset) {
     Serial.printf("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial4, Pin %u/%u)...\n",
                   PIN_UPDOWNLINK_PLUS, PIN_UPDOWNLINK_MINUS);
     downlink_ = new TelemetryDownlink(Serial4);
-    downlink_ready_ = downlink_->init(DOWNLINK_BAUDRATE);
+    downlink_ready_ = downlink_->init(rates::DOWNLINK_BAUDRATE);
     Serial4.addMemoryForWrite(serial4_tx_extra, sizeof(serial4_tx_extra));
     Serial4.addMemoryForRead(serial4_rx_extra, sizeof(serial4_rx_extra));   // Uplink
 
@@ -77,7 +75,8 @@ bool System::init(bool after_watchdog_reset) {
         static_cast<SdLogger*>(ctx)->push(frame, len);
     }, &sd_);
     if (downlink_ready_) {
-        Serial.println("INFO  [System]: Downlink bereit (38400 Baud).");
+        Serial.printf("INFO  [System]: Downlink bereit (%lu Baud).\n",
+                      static_cast<unsigned long>(rates::DOWNLINK_BAUDRATE));
     } else {
         Serial.println("WARN  [System]: Downlink konnte nicht initialisiert werden.");
     }
@@ -147,16 +146,35 @@ bool System::init(bool after_watchdog_reset) {
     rexus_ = new REXUSHAL(PIN_L0_T, PIN_SOE_I, PIN_SODS_I);
     rexus_ready_ = rexus_->init();
 
+    // -----------------------------------------------------------------------
     // Zustand des letzten Laufs wiederherstellen (siehe stateAfterReboot).
+    // Im Flug geht es mit der gesicherten Zeit weiter: letzter Checkpoint plus
+    // die Zeit seit diesem Reset (millis() laeuft ab dem Reset). Die Dauer
+    // eines Stromausfalls selbst ist nicht messbar - der Ablauf ist danach um
+    // hoechstens ~1 s plus diese Dauer verspaetet.
+    // -----------------------------------------------------------------------
     uint8_t stored = 0;
     const bool stored_valid = persist_.loadState(stored);
-    state_machine_.init(StateMachine::stateAfterReboot(stored, stored_valid));
-    last_state_ = state_machine_.getState();
-    persist_.saveState(static_cast<uint8_t>(last_state_));   // z.B. TEST -> PRE_LAUNCH festhalten
-    Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s).\n",
-                  StateMachine::toString(last_state_),
+    const MissionState start = StateMachine::stateAfterReboot(stored, stored_valid);
+    const bool timed = StateMachine::isTimed(start);
+
+    flight_flags_      = persist_.loadFlightFlags();
+    last_checkpoint_s_ = timed ? persist_.loadCheckpoint() : 0;
+
+    const uint32_t now = millis();
+    const uint32_t elapsed = timed ? last_checkpoint_s_ * 1000UL + now : 0;
+    state_machine_.init(start, now, elapsed);
+    last_state_ = start;
+    persist_.saveState(static_cast<uint8_t>(start));   // z.B. TEST -> PRE_LAUNCH festhalten
+    if (start == MissionState::DESCENT) planDescent(now);   // Motoren wieder blockieren
+    logStateEvent(start, 0, now);   // Startzustand als erstes Ereignis auf die SD-Karte
+
+    Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s, "
+                  "Flugzeit %lu ms, HDRM-Flags 0x%02X).\n",
+                  StateMachine::toString(start),
                   stored_valid ? StateMachine::toString(static_cast<MissionState>(stored))
-                               : "nichts");
+                               : "nichts",
+                  static_cast<unsigned long>(elapsed), flight_flags_);
 
     // -----------------------------------------------------------------------
     // Zusammenfassung. Der OBC startet auch dann, wenn einzelne Subsysteme
@@ -187,8 +205,10 @@ void System::run() {
     // Eingehende Telecommands verarbeiten (jeden Loop, geringe Latenz)
     handleUplink(now);
 
-    // Zustand fortschreiben (Telecommands)
+    // Zustand fortschreiben (Telecommands, REXUS-Signale, Flugzeit) und die
+    // Aktionen des Flugablaufs ausfuehren
     handleStateMachine(now);
+    handleFlight(now);
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
     if (motor_)  motor_->update();
@@ -200,21 +220,26 @@ void System::run() {
     // Laufzeitbegrenzung des Motors prüfen
     handleMotorTimeout(now);
 
-    // Telemetrie-Downlink periodisch senden (IMU + Motor)
-    if (now - last_telemetry_ms_ >= TELEMETRY_INTERVAL_MS) {
+    // Telemetrie periodisch (Raten: data_rates.hpp). Jedes Frame geht an SD
+    // und - falls die UART mitkommt - an den Downlink.
+    if (now - last_telemetry_ms_ >= rates::IMU_INTERVAL_MS) {
         last_telemetry_ms_ = now;
         handleTelemetry();
+    }
+    if (now - last_motor_telemetry_ms_ >= rates::MOTOR_INTERVAL_MS) {
+        last_motor_telemetry_ms_ = now;
         handleMotorTelemetry(motor_,  motor_ready_,  DownlinkMotorMsg::STATE);
         handleMotorTelemetry(motor2_, motor2_ready_, DownlinkMotorMsg::STATE2);
     }
 
     // Zustand + Subsystem-Gesundheit langsamer hinterherschicken (1 Hz)
-    if (now - last_sys_telemetry_ms_ >= SYS_TELEMETRY_INTERVAL_MS) {
+    if (now - last_sys_telemetry_ms_ >= rates::SYS_INTERVAL_MS) {
         last_sys_telemetry_ms_ = now;
         handleSystemTelemetry(now);
     }
 
-    // Bordspeicher zuletzt: hoechstens eine SD-Operation, nie bei laufendem Motor.
+    // Flugzeit sichern, dann Bordspeicher: beides nie bei laufendem Motor.
+    updateCheckpoint(now);
     sd_.service(now, !motorsRunning());
 }
 
@@ -383,39 +408,286 @@ void System::handleSystemTelemetry(uint32_t now_ms) {
 // ---------------------------------------------------------------------------
 
 void System::handleStateMachine(uint32_t now_ms) {
-    // REXUS weiterhin sampeln und entprellen - die Rohpegel gehen mit dem
-    // SYS/STATE-Frame nach unten, auch wenn sie nichts mehr auslösen.
-    if (rexus_ready_ && rexus_) {
-        rexus_->update(now_ms);
+    // Entprellen; die Rohpegel gehen ausserdem mit SYS/STATE nach unten.
+    if (rexus_ready_ && rexus_) rexus_->update(now_ms);
+
+    // 1. Wechsel aus Telecommands (handleUplink) ZUERST uebernehmen. Sonst
+    //    saehe update() unten z.B. nach STATE_RESET ein noch anliegendes SODS,
+    //    bevor onStateChanged() es als "erst nach Abfallen wieder gueltig"
+    //    markiert hat - und schaltete im selben Loop zurueck nach ARMED.
+    commitStateChange(now_ms);
+
+    const uint8_t asserted = currentSignalBits();
+
+    // Ein Signal, das bei der Rueckkehr nach PRE_LAUNCH noch anlag (z.B. nach
+    // der Landung), zaehlt erst wieder, nachdem es abgefallen ist - sonst
+    // startete STATE_RESET sofort den naechsten Flug. Abgefallene Bits werden
+    // geloescht; gespeichert nur bei stehenden Motoren (Flash, siehe oben).
+    const uint8_t ignore = flight_flags_ & FLIGHT_IGNORE_MASK;
+    const uint8_t still  = ignore & asserted;
+    if (still != ignore && !motorsRunning()) {
+        flight_flags_ = (flight_flags_ & ~FLIGHT_IGNORE_MASK) | still;
+        persist_.saveFlightFlags(flight_flags_);
     }
+    const uint8_t effective = asserted & ~(flight_flags_ & FLIGHT_IGNORE_MASK);
 
     StateMachineInputs in;
-    in.operator_abort = abort_requested_;
+    in.sods = effective & FLIGHT_IGNORE_SODS;
+    in.lo   = effective & FLIGHT_IGNORE_LO;
+    in.soe  = effective & FLIGHT_IGNORE_SOE;
+    in.hdrms_open_done = hdrmsOpenDone();
 
     state_machine_.update(now_ms, in);
 
-    const MissionState current = state_machine_.getState();
-    if (current != last_state_) {
-        onStateChanged(last_state_, current);
-        last_state_ = current;
-    }
+    // 2. Wechsel aus update() (Signale, Zeit) uebernehmen.
+    commitStateChange(now_ms);
+
+    // Nur ein Signal hat sich geaendert (ohne Zustandswechsel): trotzdem melden.
+    if (asserted != last_event_signals_) reportChange(last_state_, now_ms);
 }
 
-void System::onStateChanged(MissionState previous, MissionState current) {
-    (void)previous;
+void System::commitStateChange(uint32_t now_ms) {
+    const MissionState current  = state_machine_.getState();
+    const MissionState previous = last_state_;
+    if (current == previous) return;
 
-    // Sofort festhalten, damit ein Neustart im richtigen Zustand weitermacht.
-    persist_.saveState(static_cast<uint8_t>(current));
+    onStateChanged(previous, current, now_ms);
+    last_state_ = current;
+    reportChange(previous, now_ms);
+}
 
-    // Aktoren stillsetzen, sobald der Freigabezustand (TEST) verlassen wird -
-    // insbesondere bei TEST_EXIT und bei einem ABORT. BEIDE Motoren: Ein
-    // vergessener Motor liefe sonst bis zum Watchdog weiter.
-    if (!state_machine_.actuatorsUnlocked()) {
+void System::reportChange(MissionState previous, uint32_t now_ms) {
+    // Ereignis-Frame auf die SD-Karte (ms-genau) und SOFORT ein SYS-Frame in
+    // den Downlink - nicht erst zum naechsten 1-s-Takt. So sieht der Boden
+    // z.B. LO so schnell wie moeglich.
+    logStateEvent(previous, last_event_signals_, now_ms);
+    last_sys_telemetry_ms_ = now_ms;
+    handleSystemTelemetry(now_ms);
+}
+
+void System::logStateEvent(MissionState previous, uint8_t prev_signals, uint32_t now_ms) {
+    const uint8_t signals = currentSignalBits();
+    last_event_signals_ = signals;
+    if (!downlink_) return;
+    downlink_->logEvent(static_cast<uint8_t>(state_machine_.getState()),
+                        static_cast<uint8_t>(previous),
+                        eventSignals(signals), eventSignals(prev_signals), now_ms);
+}
+
+uint8_t System::eventSignals(uint8_t flight_bits) {
+    // FLIGHT_IGNORE_*-Bits -> Bitlage der REXUS-Rohbits (Bit 0 LO, 1 SOE, 2 SODS).
+    uint8_t out = 0;
+    if (flight_bits & FLIGHT_IGNORE_LO)   out |= DL_REXUS_L0;
+    if (flight_bits & FLIGHT_IGNORE_SOE)  out |= DL_REXUS_SOE;
+    if (flight_bits & FLIGHT_IGNORE_SODS) out |= DL_REXUS_SODS;
+    return out;
+}
+
+void System::onStateChanged(MissionState previous, MissionState current, uint32_t now_ms) {
+    // Flug beginnt = Wechsel vom Boden in einen Flugzustand. Das ist meist
+    // ARMED, aber direkt ASCENT/EXPERIMENT, wenn SODS bzw. LO gefehlt hat.
+    const bool flight_begins = StateMachine::isGround(previous) &&
+                               !StateMachine::isGround(current);
+
+    // 1. Motoren - ZUERST, damit die Flash-Schreibzugriffe unten keinen
+    //    laufenden Motor treffen (sie sperren die Encoder-Interrupts).
+    //    Noch geplante HDRM-Fahrten verfallen (z.B. STATE_RESET mitten im
+    //    Ablauf). Stopp bei: TEST verlassen, ABORT, Flugbeginn und jeder
+    //    Rueckkehr nach PRE_LAUNCH - off() loest dabei auch die Sperre aus
+    //    DESCENT, die Motoren laufen danach frei aus.
+    hdrm_move_[0].pending = false;
+    hdrm_move_[1].pending = false;
+    if (previous == MissionState::TEST || current == MissionState::ABORT ||
+        current == MissionState::PRE_LAUNCH || flight_begins) {
         if (motor_  && motor_ready_)  motor_->off();
         if (motor2_ && motor2_ready_) motor2_->off();
         Serial.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
                       StateMachine::toString(current));
     }
+
+    // 2. Flugdaten - VOR dem Zustand speichern. Faellt der Strom dazwischen,
+    //    startet der OBC im alten Zustand mit passenden Daten statt im neuen
+    //    mit falschen.
+    if (flight_begins) {
+        flight_flags_ = 0;                       // neuer Flug: keine HDRM-Fahrt bisher
+        persist_.saveFlightFlags(flight_flags_);
+    }
+    if (current == MissionState::PRE_LAUNCH) {
+        // Zurueck am Boden. Was jetzt noch anliegt, muss erst abfallen, bevor
+        // es wieder einen Flug startet (siehe handleStateMachine).
+        flight_flags_ = currentSignalBits();
+        persist_.saveFlightFlags(flight_flags_);
+    }
+    if (flight_begins || current == MissionState::PRE_LAUNCH ||
+        current == MissionState::ASCENT || current == MissionState::EXPERIMENT) {
+        last_checkpoint_s_ = 0;                  // neuer Zeitbezug (LO bzw. t0)
+        persist_.saveCheckpoint(0);
+    }
+    if (current == MissionState::DESCENT) planDescent(now_ms);
+
+    // 3. Zustand selbst
+    persist_.saveState(static_cast<uint8_t>(current));
+}
+
+// ---------------------------------------------------------------------------
+// Flugablauf
+// ---------------------------------------------------------------------------
+
+void System::handleFlight(uint32_t now_ms) {
+    const MissionState state = state_machine_.getState();
+    const uint32_t t = state_machine_.elapsed(now_ms);
+
+    // HDRMs oeffnen. Die Fahrt wird VOR dem Start im EEPROM vermerkt (die
+    // Motoren stehen dann noch) und laeuft hoechstens einmal pro Flug - auch
+    // wenn ein Neustart sie unterbricht. Ein zweiter Versuch aus unbekannter
+    // Position koennte das HDRM gegen den Anschlag fahren.
+    if (state == MissionState::EXPERIMENT && t >= timeline::HDRM_OPEN_AT_MS &&
+        !(flight_flags_ & FLIGHT_HDRM_OPENED) && !motorsRunning()) {
+        flight_flags_ |= FLIGHT_HDRM_OPENED;
+        persist_.saveFlightFlags(flight_flags_);
+        Serial.printf("INFO  [System]: t0+%lu ms - HDRMs oeffnen.\n",
+                      static_cast<unsigned long>(t));
+        scheduleHdrmMoves(now_ms, timeline::HDRM_OPEN_DEG);
+    }
+
+    // Geplante Fahrten starten, sobald faellig. Gleicher Weg wie MOTOR_TURN
+    // im Testmodus (execMotorAction).
+    MotorHAL* const motors[2] = { motor_, motor2_ };
+    const bool ready[2]       = { motor_ready_, motor2_ready_ };
+    uint32_t* const on_since[2] = { &motor_on_since_ms_, &motor2_on_since_ms_ };
+    const char* const labels[2] = { "HDRM1", "HDRM2" };
+    for (uint8_t i = 0; i < 2; i++) {
+        HdrmMove& move = hdrm_move_[i];
+        if (!move.pending || static_cast<int32_t>(now_ms - move.due_ms) < 0) continue;
+        move.pending = false;
+        execMotorAction(motors[i], ready[i], labels[i], MotorAction::TURN,
+                        move.degrees, *on_since[i]);
+    }
+
+    if (state == MissionState::ROBOT_ARM) robotArmStep(t);
+
+    // DESCENT: jeden Motor blockieren, sobald seine Schliessfahrt vorbei ist.
+    if (state == MissionState::DESCENT) {
+        for (uint8_t i = 0; i < 2; i++) {
+            MotorHAL* m = motors[i];
+            if (!ready[i] || !m || hdrm_move_[i].pending || m->isTurning() || m->isLocked()) continue;
+            m->lock();
+            Serial.printf("INFO  [System]: %s blockiert (alle Motor-Pins HIGH).\n", labels[i]);
+        }
+    }
+}
+
+void System::scheduleHdrmMoves(uint32_t now_ms, int16_t degrees) {
+    hdrm_move_[0] = { true, now_ms, degrees };
+    hdrm_move_[1] = { true, now_ms + timeline::HDRM_STAGGER_MS, degrees };
+}
+
+void System::planDescent(uint32_t now_ms) {
+    // Nur schliessen, was geoeffnet wurde - und nur einmal pro Flug (siehe
+    // handleFlight). Danach blockiert handleFlight() beide Motoren.
+    if (!(flight_flags_ & FLIGHT_HDRM_OPENED) || (flight_flags_ & FLIGHT_HDRM_CLOSED)) return;
+    flight_flags_ |= FLIGHT_HDRM_CLOSED;
+    persist_.saveFlightFlags(flight_flags_);
+    Serial.println("INFO  [System]: DESCENT - HDRMs schliessen.");
+    scheduleHdrmMoves(now_ms, timeline::HDRM_CLOSE_DEG);
+}
+
+uint8_t System::currentSignalBits() const {
+    if (!rexus_ready_ || !rexus_) return 0;
+    uint8_t bits = 0;
+    if (rexus_->readSODS()) bits |= FLIGHT_IGNORE_SODS;
+    if (rexus_->readL0T())  bits |= FLIGHT_IGNORE_LO;
+    if (rexus_->readSOE())  bits |= FLIGHT_IGNORE_SOE;
+    return bits;
+}
+
+bool System::hdrmsOpenDone() const {
+    if (!(flight_flags_ & FLIGHT_HDRM_OPENED)) return false;
+    if (hdrm_move_[0].pending || hdrm_move_[1].pending) return false;
+    return !(motor_ && motor_->isTurning()) && !(motor2_ && motor2_->isTurning());
+}
+
+void System::robotArmStep(uint32_t t_ms) {
+    // PLATZHALTER - Roboterarm noch nicht implementiert. Wird jeden Loop in
+    // ROBOT_ARM mit der Zeit seit t0 aufgerufen; um t0 + DESCENT_AT_MS
+    // wechselt die Zustandsmaschine selbst nach DESCENT.
+    //
+    // Beim Implementieren beachten (Ergebnis der Vorbesprechung):
+    //  - Trajektorie: EINE Datei auf der SD-Karte, in Segmente (je Bewegung)
+    //    unterteilt, mit Header + CRC32. Beim Booten komplett ins RAM laden und
+    //    pruefen - im Flug die Karte nur schreiben, nie lesen (100-250 ms
+    //    Busy-Zeiten). Optional: eingebaute Standard-Trajektorie im Flash als
+    //    Rueckfallebene, falls Datei fehlt oder CRC nicht passt.
+    //  - Bewegungen sind DATEN, keine MissionStates: Segment-Index innerhalb
+    //    von ROBOT_ARM.
+    //  - Der Arm meldet seine Position: Segment erst fertig, wenn die Position
+    //    im Toleranzfenster des Endpunkts liegt; pro Segment ein Zeitlimit,
+    //    danach weiter zum naechsten. Keine Antwort = Arm ausgefallen, der
+    //    Zeitplan laeuft ohne ihn weiter.
+    //  - Neustart: Position vom Arm lesen und von dort fortsetzen; den
+    //    Segment-Index zusaetzlich an Segmentgrenzen im EEPROM sichern
+    //    (nur wenn der Arm steht - Flash sperrt Interrupts).
+    //  - Letztes Segment = Verstauen, mit Abstand VOR DESCENT_AT_MS. Die HDRMs
+    //    schliessen um t0 + 115 s - vorher pruefen, ob der Arm verstaut ist.
+    //    OFFEN: Was tun, wenn er es nicht ist? (Mechanik klaeren)
+    //  - Der Arm hat eine eigene Steuerplatine; der OBC schickt nur
+    //    Positionsbefehle per UART (max. 10 Hz). Deshalb NICHT in
+    //    motorsRunning() aufnehmen - sonst stuende der SD-Bordspeicher die
+    //    ganze Arm-Phase still. Folgen davon:
+    //      * Eine SD-Schreiboperation kann den Loop 100-250 ms anhalten - ein
+    //        Befehl kommt dann entsprechend spaeter. Die Arm-Platine muss das
+    //        abfangen (interpolieren bzw. letztes Ziel halten), nicht auf
+    //        exakte 100-ms-Schritte bauen.
+    //      * Checkpoint-Writes (Flash) sperren kurz die Interrupts - Bytes VOM
+    //        Arm koennen dabei verloren gehen. Antworten deshalb mit Start-
+    //        Marker + CRC rahmen (wie der Uplink, der sich selbst resynct).
+    //  - Arm-Positionen nur auf die SD-Karte loggen (eigene MSGID im selben
+    //    20-Byte-Format), der Downlink bleibt unveraendert.
+    (void)t_ms;
+}
+
+void System::updateCheckpoint(uint32_t now_ms) {
+    if (!StateMachine::isTimed(state_machine_.getState())) return;
+    if (motorsRunning()) return;   // Flash sperrt Interrupts - siehe persistent_state.hpp
+
+    const uint32_t s = state_machine_.elapsed(now_ms) / 1000;
+    const uint16_t seconds = s > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(s);
+    if (seconds == last_checkpoint_s_) return;
+    last_checkpoint_s_ = seconds;
+    persist_.saveCheckpoint(seconds);
+}
+
+bool System::commandAllowed(UplinkOpcode op) const {
+    // STATE_RESET geht immer - reines Testwerkzeug, um aus jedem Zustand
+    // zurueck nach PRE_LAUNCH zu kommen. Im Flug gibt es ohnehin keinen Uplink.
+    if (op == UplinkOpcode::STATE_RESET) return true;
+
+    switch (state_machine_.getState()) {
+        // Ab LO: keinerlei Eingriff - kein Abbruch, kein Neustart, kein
+        // vorzeitiges Schliessen. Das Experiment fliegt, wie es geplant ist.
+        case MissionState::ASCENT:
+        case MissionState::EXPERIMENT:
+        case MissionState::ROBOT_ARM:
+            return false;
+
+        // Nach dem Experiment nur STATE_RESET (oben). MOTOR_OFF wuerde die
+        // Motorsperre loesen und ist deshalb hier gesperrt.
+        case MissionState::DESCENT:
+            return false;
+
+        // Rampe vor LO: Startabbruch muss moeglich sein, Motorfahrten nicht.
+        case MissionState::ARMED:
+            return op == UplinkOpcode::ABORT ||
+                   op == UplinkOpcode::MOTOR_OFF || op == UplinkOpcode::MOTOR2_OFF ||
+                   op == UplinkOpcode::FORCE_TARE;
+
+        // Boden: alles; Motorfahrten prueft handleUplink() weiter auf TEST.
+        case MissionState::PRE_LAUNCH:
+        case MissionState::TEST:
+        case MissionState::ABORT:
+            return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +701,14 @@ void System::handleUplink(uint32_t now_ms) {
     while (uplink_->poll(cmd)) {
         const UplinkOpcode op = static_cast<UplinkOpcode>(cmd.opcode);
 
-        // System-Kommandos sind immer erlaubt.
+        if (!commandAllowed(op)) {
+            Serial.printf("WARN  [System]: Telecommand 0x%02X abgewiesen - im Zustand %s "
+                          "nicht zulaessig.\n",
+                          cmd.opcode, StateMachine::toString(state_machine_.getState()));
+            continue;
+        }
+
+        // System- und Sicherheitskommandos (Zustand pruefen die Funktionen selbst).
         switch (op) {
             case UplinkOpcode::TEST_ENTER:
                 state_machine_.enterTest(now_ms);
@@ -439,12 +718,10 @@ void System::handleUplink(uint32_t now_ms) {
                 continue;
             case UplinkOpcode::ABORT:
                 Serial.println("WARN  [System]: ABORT per Telecommand empfangen.");
-                abort_requested_ = true;
+                state_machine_.abort(now_ms);
                 continue;
             case UplinkOpcode::STATE_RESET:
-                // Erst den Abbruch-Latch loesen, sonst schaltet update() im
-                // selben Loop sofort wieder auf ABORT.
-                if (state_machine_.resetFromAbort(now_ms)) abort_requested_ = false;
+                state_machine_.resetToPreLaunch(now_ms);
                 continue;
 
             case UplinkOpcode::FORCE_TARE:
@@ -469,18 +746,16 @@ void System::handleUplink(uint32_t now_ms) {
                 continue;
 
             case UplinkOpcode::MOTOR_OFF:
-                // Ausschalten ist ein SICHERHEITSkommando und deshalb immer
-                // erlaubt - anders als alle uebrigen Aktor-Kommandos. Lag es
-                // hinter der TEST-Sperre, liesse sich ein laufender Motor
-                // ausserhalb von TEST nur noch per ABORT stoppen, und ABORT ist
-                // ein Endzustand, aus dem nur ein Reset herausfuehrt.
-                Serial.println("INFO  [System]: TC MOTOR_OFF (zustandsunabhaengig)");
+                // Ausschalten ist ein SICHERHEITSkommando und deshalb in allen
+                // Bodenzustaenden erlaubt, nicht nur in TEST (im Flug und in
+                // DESCENT sperrt es commandAllowed()).
+                Serial.println("INFO  [System]: TC MOTOR_OFF");
                 execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::OFF, 0, motor_on_since_ms_);
                 continue;
 
             case UplinkOpcode::MOTOR2_OFF:
                 // Gleiche Ausnahme wie MOTOR_OFF, fuer Motor 2.
-                Serial.println("INFO  [System]: TC MOTOR2_OFF (zustandsunabhaengig)");
+                Serial.println("INFO  [System]: TC MOTOR2_OFF");
                 execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::OFF, 0, motor2_on_since_ms_);
                 continue;
 

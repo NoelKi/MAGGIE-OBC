@@ -20,8 +20,8 @@
  * ---------------------------------------------------------------------------
  * Robustheit - die SD-Karte darf den Loop nie gefaehrden
  * ---------------------------------------------------------------------------
- * 1. RAM-Puffer: push() kopiert nur in einen Ringpuffer (128 KB, > 60 s
- *    Telemetrie). Die Karte wird in service() bedient, hoechstens EINE
+ * 1. RAM-Puffer: push() kopiert nur in einen Ringpuffer (256 KB, ~30 s bei
+ *    den Raten aus data_rates.hpp). Die Karte wird in service() bedient, hoechstens EINE
  *    SD-Operation (max. 512 Byte) pro Loop.
  * 2. Keine Kartenzugriffe, waehrend ein Motor laeuft: Eine SD-Karte kann
  *    intern fuer 100..250 ms busy sein. In der Zeit liefe ein Motor ueber
@@ -39,7 +39,7 @@
 class SdLogger {
 public:
     static constexpr uint32_t FILE_PERIOD_MS = 10000;     ///< neue Datei alle 10 s
-    static constexpr uint32_t BUFFER_SIZE    = 128 * 1024; ///< Zweierpotenz (Maske)
+    static constexpr uint32_t BUFFER_SIZE    = 256 * 1024; ///< Zweierpotenz (Maske), ~30 s bei 8 KB/s
     static constexpr uint32_t CHUNK_SIZE     = 512;        ///< ein SD-Sektor
 
     /**

@@ -56,7 +56,7 @@ uint8_t TelemetryDownlink::crc8(const uint8_t* data, size_t len) {
 
 void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
                                   const uint8_t data[DOWNLINK_DATA_SIZE],
-                                  uint8_t status1, uint8_t status2) {
+                                  uint8_t status1, uint8_t status2, bool sd_only) {
     if (!initialized_) return;
 
     uint8_t frame[DOWNLINK_FRAME_SIZE];
@@ -85,8 +85,30 @@ void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
     frame[18] = crc8(&frame[1], 17);
     frame[19] = DL_END;
 
-    serial_.write(frame, DOWNLINK_FRAME_SIZE);
+    // SD-Karte bekommt jedes Frame.
     if (tap_) tap_(tap_ctx_, frame, DOWNLINK_FRAME_SIZE);
+    if (sd_only) return;   // Ereignis-Frames: kein UART, kein Zaehler
+
+    // UART: nie blockieren (write() wuerde warten, bis Platz ist). Zwei Spuren:
+    //  - SYS-Frames (Zustand, REXUS-Signale): immer, sobald das Frame passt.
+    //  - Alles andere (IMU, Kraft, Motor): nur solange die Warteschlange kurz
+    //    ist (DOWNLINK_NORMAL_QUEUE_MAX). Sonst stuende ein SYS-Frame hinter
+    //    hunderten Byte Sensordaten an - und waere bei voller Leitung so oft
+    //    weg wie jedes andere Frame. Verworfenes fehlt nur im Downlink (der
+    //    Boden sieht eine Zaehler-Luecke), die SD-Karte hat es.
+    const int free_bytes = serial_.availableForWrite();
+    if (free_bytes > tx_capacity_) tx_capacity_ = free_bytes;   // leerer Puffer = Kapazitaet
+    const int queued = tx_capacity_ - free_bytes;
+    const bool priority = msgid1 == static_cast<uint8_t>(DownlinkSubsystem::SYS);
+
+    const bool send = priority
+        ? free_bytes >= DOWNLINK_FRAME_SIZE
+        : queued + DOWNLINK_FRAME_SIZE <= DOWNLINK_NORMAL_QUEUE_MAX;
+    if (send) {
+        serial_.write(frame, DOWNLINK_FRAME_SIZE);
+    } else {
+        uart_dropped_++;
+    }
     counter_++;
 }
 
@@ -208,4 +230,20 @@ void TelemetryDownlink::sendSystem(uint8_t mission_state, uint8_t subsystems,
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
               static_cast<uint8_t>(DownlinkSysMsg::STATE),
               0, data, status1, status2);
+}
+
+void TelemetryDownlink::logEvent(uint8_t state, uint8_t prev_state, uint8_t signals,
+                                 uint8_t prev_signals, uint32_t millis_now) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    data[0] = state;
+    data[1] = prev_state;
+    data[2] = signals;
+    data[3] = prev_signals;
+    put_be32(&data[4], static_cast<int32_t>(millis_now));
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::EVENT),
+              static_cast<uint8_t>(DownlinkEventMsg::STATE),
+              0, data, 0, 0, /*sd_only=*/true);
 }

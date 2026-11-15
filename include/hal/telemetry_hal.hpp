@@ -106,6 +106,12 @@ static constexpr bool UPLINK_RX_INVERTED = false;
 
 // Frame geometry
 static constexpr uint8_t DOWNLINK_FRAME_SIZE = 20;
+
+/// Hoechstens so viele Byte normaler Sensordaten (IMU, Kraft, Motor) duerfen in
+/// der UART-Warteschlange stehen - 120 Byte sind bei 38400 Baud ~31 ms. Bei
+/// hoeherer Baudrate entsprechend groesser waehlen. SYS-Frames haben Vorrang
+/// und nutzen den ganzen Puffer (siehe sendFrame).
+static constexpr int DOWNLINK_NORMAL_QUEUE_MAX = 120;
 static constexpr uint8_t DOWNLINK_DATA_SIZE  = 8;
 
 // Frame markers
@@ -118,6 +124,12 @@ enum class DownlinkSubsystem : uint8_t {
     MOTOR = 0x02,
     SYS   = 0x03,
     FORCE = 0x04,
+    EVENT = 0x10,   ///< NUR SD-Karte - geht nie ueber die UART (siehe logEvent)
+};
+
+// MSGID2 - message type for the EVENT subsystem (SD only)
+enum class DownlinkEventMsg : uint8_t {
+    STATE = 0x01,   ///< Zustand oder REXUS-Signal hat sich geaendert
 };
 
 // MSGID2 - message type for the IMU subsystem
@@ -283,6 +295,24 @@ public:
     void sendUplinkRaw(const uint8_t* bytes, uint8_t len);
 
     /**
+     * @brief Ereignis-Frame NUR fuer die SD-Karte (EVENT/STATE).
+     *
+     * Zustandswechsel und REXUS-Flanken auf die Millisekunde - der Downlink
+     * kennt sie nur aus dem 1-Hz-SYS-Frame. Geht ausschliesslich an den Tap,
+     * nie ueber die UART, und zaehlt den Frame-Zaehler NICHT hoch (sonst saehe
+     * der Boden Luecken, die keine sind).
+     *
+     * DATA: [state prev_state signals prev_signals millis(uint32 BE)]
+     *       signals = entprellte, interpretierte REXUS-Signale (Bit 0 LO,
+     *       Bit 1 SOE, Bit 2 SODS - wie DL_REXUS_*, aber 1 = liegt an).
+     */
+    void logEvent(uint8_t state, uint8_t prev_state, uint8_t signals,
+                  uint8_t prev_signals, uint32_t millis_now);
+
+    /// Frames, die wegen voller UART nur auf der SD-Karte gelandet sind.
+    uint32_t uartDropped() const { return uart_dropped_; }
+
+    /**
      * @brief Mithoerer fuer gesendete Frames (z.B. der SD-Bordspeicher).
      *
      * Bekommt jedes Frame NACH dem Senden, byte-identisch. Aendert nichts an
@@ -297,6 +327,8 @@ private:
     void*    tap_ctx_ = nullptr;
     uint16_t counter_ = 0;
     bool initialized_ = false;
+    uint32_t uart_dropped_ = 0;
+    int      tx_capacity_  = 0;   ///< groesster je gesehener freier UART-Puffer
 
     /**
      * @brief Assemble and transmit one 20-byte downlink frame.
@@ -304,7 +336,7 @@ private:
      */
     void sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
                    const uint8_t data[DOWNLINK_DATA_SIZE],
-                   uint8_t status1, uint8_t status2);
+                   uint8_t status1, uint8_t status2, bool sd_only = false);
 
     /// CRC-8, polynomial 0x07, init 0x00 (SMBus/CCITT style)
     static uint8_t crc8(const uint8_t* data, size_t len);

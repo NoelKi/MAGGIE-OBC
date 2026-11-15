@@ -5,83 +5,93 @@
 
 /**
  * @file state_machine.hpp
- * @brief MAGGIE Zustandsmaschine - schlanker Testaufbau
+ * @brief MAGGIE Zustandsmaschine - Boden- und Flugablauf
  *
- * Ablauf:
- *   PRE_LAUNCH --TC TEST_ENTER--> TEST --TC TEST_EXIT--> PRE_LAUNCH
- *   aus beiden --TC ABORT--> ABORT --TC STATE_RESET--> PRE_LAUNCH
+ *   PRE_LAUNCH ──TC TEST_ENTER──► TEST ──TC TEST_EXIT──► PRE_LAUNCH
+ *   PRE_LAUNCH / TEST / ARMED ──TC ABORT──► ABORT
+ *   jeder Zustand ──TC STATE_RESET──► PRE_LAUNCH   (Testwerkzeug)
  *
- * Neustart (Watchdog, Stromausfall): System speichert jeden Zustandswechsel
- * nichtfluechtig (PersistentState) und startet ueber stateAfterReboot() wieder
- * im richtigen Zustand. ABORT bleibt ueber jeden Neustart erhalten.
+ *   PRE_LAUNCH / TEST ──SODS──► ARMED ──LO──► ASCENT ──SOE / 70 s──► EXPERIMENT
+ *   EXPERIMENT ──HDRMs offen──► ROBOT_ARM ──t0+115 s──► DESCENT
  *
- * TEST ist der einzige Zustand, in dem Aktor-Telecommands (Motor) ausgeführt
- * werden - System::handleUplink() weist sie sonst ab.
+ * REXUS-Signale sind Wahrheit: Ein spaeteres Signal schliesst die frueheren
+ * ein. LO fuehrt aus JEDEM Bodenzustand (auch ABORT, auch ohne SODS) nach
+ * ASCENT, SOE direkt nach EXPERIMENT. Fehlt ein Signal oder ein Telecommand
+ * am Boden, startet das Experiment trotzdem, sobald die Rakete fliegt.
+ * Nur SODS respektiert ABORT - so bleibt ein Startabbruch auf der Rampe
+ * moeglich, solange LO nicht kam.
  *
- * Die REXUS-Signale (L0/SOE/SODS) loesen hier bewusst KEINE Uebergaenge mehr
- * aus: sie werden nur noch eingelesen und als Rohpegel mit dem SYS/STATE-Frame
- * heruntergefunkt (siehe System::handleSystemTelemetry). Erst wenn die
- * Flugsequenz zurueckkommt, werden sie wieder zu Eingaengen.
+ * Die Zustandsmaschine entscheidet nur UEBER Zustaende und Zeiten. Was in
+ * einem Zustand passiert (HDRM-Fahrten, Motorsperre) und welche Telecommands
+ * gelten, macht System - die Zustandsmaschine kennt keine Hardware.
+ *
+ * Ab LO gibt es keinen Rueckweg: ASCENT, EXPERIMENT und ROBOT_ARM laufen nur
+ * vorwaerts und nur ueber Signale und Zeit.
  */
 
-/// Eingaenge pro update()-Aufruf. System liest sie aus den HALs - die
-/// State Machine kennt keine HAL-Objekte direkt.
+/// Eingaenge pro update()-Aufruf. System liest sie aus den HALs.
 struct StateMachineInputs {
-    /// Manueller Abbruch per Telecommand (UplinkOpcode::ABORT).
-    bool operator_abort = false;
+    bool sods = false;              ///< REXUS SODS liegt an (entprellt)
+    bool lo   = false;              ///< REXUS LO liegt an (entprellt)
+    bool soe  = false;              ///< REXUS SOE liegt an (entprellt)
+    bool hdrms_open_done = false;   ///< beide HDRM-Oeffnungsfahrten beendet
 };
 
 class StateMachine {
 public:
-    StateMachine() = default;
-
-    /// Setzt den Startzustand - nach einem Neustart den aus stateAfterReboot().
-    void init(MissionState start = MissionState::PRE_LAUNCH);
-
     /**
-     * @brief In welchem Zustand nach einem Neustart weitermachen?
-     *
-     * EINZIGE Stelle, die das entscheidet - kommen die Flugzustaende zurueck,
-     * wird hier festgelegt, welche davon fortgesetzt werden.
-     *
-     * @param stored gespeicherter Zustand (Rohwert aus dem EEPROM)
-     * @param valid  false, wenn nie gespeichert oder beschaedigt
+     * @brief Startzustand setzen.
+     * @param start      Zustand aus stateAfterReboot()
+     * @param elapsed_ms bereits verstrichene Zeit im Flug (siehe elapsed())
      */
-    static MissionState stateAfterReboot(uint8_t stored, bool valid);
+    void init(MissionState start, uint32_t now_ms, uint32_t elapsed_ms);
 
     /// Einmal pro System::run()-Durchlauf aufrufen.
     void update(uint32_t now_ms, const StateMachineInputs& in);
 
     MissionState getState() const { return state_; }
 
-    /// Klartextname des aktuellen Zustands (fürs Log).
+    /// Klartextname eines Zustands (fuers Log).
     static const char* toString(MissionState state);
 
     /**
-     * @brief Bodentest-Modus betreten (Telecommand TEST_ENTER).
-     * Nur aus PRE_LAUNCH erlaubt - aus ABORT fuehrt nur ein Reset heraus.
-     * @return true, wenn der Wechsel stattgefunden hat
+     * @brief In welchem Zustand nach einem Neustart weitermachen?
+     *
+     * EINZIGE Stelle, die das entscheidet. Flugzustaende und ABORT werden
+     * fortgesetzt, TEST faellt auf PRE_LAUNCH zurueck.
      */
+    static MissionState stateAfterReboot(uint8_t stored, bool valid);
+
+    /// Telecommand TEST_ENTER - nur aus PRE_LAUNCH.
     bool enterTest(uint32_t now_ms);
-
-    /**
-     * @brief Bodentest-Modus verlassen (Telecommand TEST_EXIT) -> PRE_LAUNCH.
-     * @return true, wenn der Wechsel stattgefunden hat
-     */
+    /// Telecommand TEST_EXIT - nur aus TEST.
     bool exitTest(uint32_t now_ms);
+    /// Telecommand ABORT - nur am Boden (PRE_LAUNCH, TEST, ARMED).
+    bool abort(uint32_t now_ms);
+    /// Telecommand STATE_RESET -> PRE_LAUNCH - aus jedem Zustand (Testwerkzeug).
+    bool resetToPreLaunch(uint32_t now_ms);
 
-    /**
-     * @brief ABORT verlassen (Telecommand STATE_RESET) -> PRE_LAUNCH.
-     * Nur aus ABORT - ABORT ist sonst endgueltig, auch ueber Neustarts.
-     * @return true, wenn der Wechsel stattgefunden hat
-     */
-    bool resetFromAbort(uint32_t now_ms);
-
-    /// true, solange Aktor-Telecommands ausgeführt werden dürfen.
+    /// true, solange Motor-Telecommands ausgefuehrt werden duerfen.
     bool actuatorsUnlocked() const { return state_ == MissionState::TEST; }
+
+    /// Zeitbezug: in ASCENT seit LO, ab EXPERIMENT seit t0.
+    uint32_t elapsed(uint32_t now_ms) const { return now_ms - base_ms_; }
+
+    /// Bodenzustaende: hier ist kein Flug im Gang.
+    static bool isGround(MissionState s) {
+        return s == MissionState::PRE_LAUNCH || s == MissionState::TEST ||
+               s == MissionState::ABORT;
+    }
+
+    /// Zustaende, deren verstrichene Zeit ueber einen Neustart gerettet wird.
+    static bool isTimed(MissionState s) {
+        return s == MissionState::ASCENT || s == MissionState::EXPERIMENT ||
+               s == MissionState::ROBOT_ARM;
+    }
 
 private:
     MissionState state_ = MissionState::PRE_LAUNCH;
+    uint32_t base_ms_ = 0;   ///< Zeitbezug fuer elapsed()
 
     void transitionTo(MissionState next, uint32_t now_ms);
 };

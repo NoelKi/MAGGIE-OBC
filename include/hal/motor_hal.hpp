@@ -181,6 +181,20 @@ public:
      */
     void update();
 
+    /**
+     * @brief Motor dauerhaft blockieren (DESCENT).
+     *
+     * Beide Eingaenge dauerhaft HIGH = DRV8871 "Brake" (Table 1): Die
+     * Motorklemmen sind kurzgeschlossen, der Motor bremst jede Bewegung gegen
+     * sich selbst ab - zusammen mit dem 380:1-Getriebe haelt das das HDRM zu.
+     * Das ist Kurzschlussbremsung, kein aktives Halten: Es fliesst kein Strom,
+     * solange sich nichts bewegt.
+     *
+     * Bleibt bestehen bis zum naechsten Fahrbefehl, off() oder Strom aus.
+     */
+    void lock();
+    bool isLocked() const { return locked_; }
+
     bool isOn() const { return is_on_; }          ///< Dauer-An/Aus-Zustand (on()/off())
     bool isTurning() const { return turning_; }   ///< turnBy()-Drehung laeuft
     bool hasEncoder() const { return enc_ != nullptr; }
@@ -200,6 +214,7 @@ private:
     bool soft_approach_ = false;   ///< siehe SOFT_APPROACH_* oben
     int16_t current_speed_ = 0;
     bool initialized_ = false;
+    bool locked_      = false;   ///< siehe lock()
 
     Encoder* enc_ = nullptr;   ///< Quadratur-Encoder (nullptr = keine Messung)
     bool is_on_  = false;      ///< logischer An/Aus-Zustand (on()/off())
@@ -213,12 +228,26 @@ private:
     uint32_t turn_ref_ms_  = 0;  ///< Beginn des aktuellen Fortschrittsfensters
     long     turn_ref_pos_ = 0;  ///< Position zu Beginn dieses Fensters
 
+    // Losbrechen beim Anfahren, siehe updateBreakaway().
+    int8_t   turn_dir_         = 1;      ///< +1 / -1: Richtung zum Ziel
+    int16_t  turn_cruise_      = 0;      ///< PWM-Betrag der Fahrt
+    bool     turn_moving_      = false;  ///< Motor hat sich seit dem Start bewegt
+    bool     running_up_       = false;  ///< Anlauf rueckwaerts laeuft gerade
+    long     runup_start_pos_  = 0;      ///< Position zu Beginn des Anlaufs
+    uint8_t  breakaway_tries_  = 0;
+    uint32_t breakaway_ms_     = 0;      ///< Beginn der aktuellen Phase
+
     bool     braking_        = false;  ///< Bremsimpuls laeuft
     uint32_t brake_start_ms_ = 0;      ///< Beginn des Bremsimpulses
 
     /// Gemeinsamer Start fuer turnBy() und goTo().
     void startMove(long target, int16_t degrees, const char* kind);
     void updateTurn();   ///< Fahrt am Ziel abschalten
+    /// Anfahren ueberwachen und ggf. losruckeln. true = updateTurn() soll
+    /// in diesem Durchlauf nichts weiter tun.
+    bool updateBreakaway(long pos);
+    /// Anlauf beginnen: RUNUP_COUNTS rueckwaerts ins Getriebespiel.
+    void startRunup(long pos);
     void updateBrake();  ///< Bremsimpuls nach BRAKE_MS beenden
 
     /** @brief Schreibt beide Kanaele per analogWrite. */
@@ -246,6 +275,31 @@ private:
     // ueberhaupt auffaellt, dass etwas nicht stimmt.
     static constexpr uint32_t TURN_STALL_MS    = 1000;  ///< Fenster ohne Fortschritt
     static constexpr long     TURN_MIN_COUNTS  = 3;     ///< Fortschritt, der als Bewegung zaehlt
+
+    // -----------------------------------------------------------------------
+    // Anlauf aus dem Getriebespiel (siehe updateBreakaway)
+    // -----------------------------------------------------------------------
+    // Beobachtet am Aufbau: Laeuft der Motor einmal, laeuft er durch - aber
+    // manchmal laeuft er trotz vollem PWM gar nicht erst an (Haftreibung im
+    // 380:1-Getriebe bzw. im HDRM).
+    //
+    // Deshalb dreht JEDE Fahrt zuerst ein paar MOTOR-Umdrehungen rueckwaerts -
+    // nur innerhalb des Getriebespiels, die Abtriebswelle bewegt sich dabei
+    // nicht. Danach geht es in Fahrtrichtung: Der Motor hat Schwung, bevor
+    // die Zahnflanken wieder greifen, statt aus dem Stand gegen die Last
+    // anzulaufen. Laeuft er trotzdem nicht an, folgt ein weiterer Anlauf;
+    // nach BREAKAWAY_TRIES gilt die Fahrt als gescheitert (turnFailed()).
+    //
+    // RUNUP_MOTOR_REVS ist an das Getriebespiel anzupassen: so gross, dass der
+    // Motor Schwung holt, so klein, dass sich der Abtrieb nicht rueckwaerts
+    // bewegt. Der Encoder sitzt auf der Motorwelle (12 Counts/Umdrehung), der
+    // Weg ist also genau messbar.
+    static constexpr long     MOTOR_COUNTS_PER_MOTOR_REV = 12;  ///< Encoder auf der Motorwelle
+    static constexpr long     RUNUP_MOTOR_REVS    = 3;     ///< ~2,8 Grad am Abtrieb
+    static constexpr long     RUNUP_COUNTS        = RUNUP_MOTOR_REVS * MOTOR_COUNTS_PER_MOTOR_REV;
+    static constexpr uint32_t RUNUP_MAX_MS        = 100;   ///< Anlauf endet spaetestens hier (Anschlag)
+    static constexpr uint32_t BREAKAWAY_DETECT_MS = 150;   ///< so lange auf Bewegung warten
+    static constexpr uint8_t  BREAKAWAY_TRIES     = 3;     ///< Anlaeufe insgesamt
 
     // -----------------------------------------------------------------------
     // Sanfte Anfahrt (nur wenn soft_approach_ true ist, siehe Konstruktor)

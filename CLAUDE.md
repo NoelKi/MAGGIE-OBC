@@ -25,12 +25,21 @@ sie das Gewicht des Arms nicht halten – wird der ganze Arm unter Schwerkraft
 bewegt, gehen die Gelenke kaputt. Der vollständige Arm wird deshalb erst in
 Mikrogravitation getestet.
 
-- Am Boden ist nur der **Einzelgelenk-Test** zulässig: ein Gelenk ohne
-  Armlast, in kleinen Jog-Schritten, langsam (TEST-Zustand, `ARM_JOG`).
+- Am Boden sind nur zulässig:
+  - der **Einzelgelenk-Test**: ein Gelenk ohne Armlast, in kleinen
+    Jog-Schritten, langsam (TEST-Zustand, `ARM_JOG`);
+  - der **Trajektorientest mit höchstens zwei Gelenken** im Testaufbau
+    (`ARM_TRAJ_TEST`, `ArmTrajPlayer`, `tools/arm_trajectory.py`): nur in TEST,
+    je Gelenk höchstens ±30° um den Startwinkel, Ende = Start, höchstens
+    20 °/s, Abbruch mit STOP + INHIBIT bei Schleppfehler oder fehlender
+    Rückmeldung. Vom Team am 15.11.2026 für den aktuellen Testaufbau
+    freigegeben (z. Zt. Gelenk 1 = Node 5, Gelenk 2 = Node 6).
 - Keinen Code, keine Skripte und keine Befehle vorschlagen oder ausführen, die
-  mehrere Gelenke oder den ganzen Arm am Boden bewegen (z. B. Trajektorien,
-  Homing-Fahrten, Flugskript testweise in PRE_LAUNCH/TEST starten).
-- Die Schutzmechanismen nicht lockern: Jog-Limit `ARM_JOG_MAX_DEG`, Freigabe
+  mehr als zwei Gelenke oder den ganzen Arm am Boden bewegen, oder zwei
+  Gelenke außerhalb des Trajektorientests oben (z. B. Homing-Fahrten,
+  Flugskript testweise in PRE_LAUNCH/TEST starten).
+- Die Schutzmechanismen nicht lockern: Jog-Limit `ARM_JOG_MAX_DEG`, die
+  Grenzen des `ArmTrajPlayer` (Gelenkzahl, Winkel, Geschwindigkeit), Freigabe
   nur in TEST, STOP + INHIBIT an alle Gelenke beim Verlassen von TEST und bei
   ABORT (`System::stopArm()`). Soll daran etwas geändert werden, vorher beim
   Nutzer nachfragen.

@@ -95,9 +95,10 @@ enum class UplinkOpcode : uint8_t {
     /// LED des Gelenks blinken lassen (ICD BLINK) - zur Zuordnung Node-ID zu
     /// Gelenk. Bewegt nichts, deshalb in allen Bodenzustaenden.
     ARM_BLINK        = 0x35,
-    /// Trajektorien-Test an EINEM Gelenk: spielt arm_test_trajectory.hpp
+    /// Trajektorientest an 1-2 Gelenken: spielt arm_test_trajectory.hpp
     /// relativ zum aktuellen Winkel ab (+-30 Grad, Ende = Start), siehe
-    /// ArmTrajPlayer. High-Byte = Gelenk, Low-Byte = 0. Nur TEST.
+    /// ArmTrajPlayer. High-Byte = Gelenk fuer Spalte 1, Low-Byte = Gelenk
+    /// fuer Spalte 2 (0 = nur eines). Nur TEST.
     /// Abbruch: ARM_STOP / ARM_INHIBIT, TEST verlassen, ABORT.
     ARM_TRAJ_TEST    = 0x36,
 };

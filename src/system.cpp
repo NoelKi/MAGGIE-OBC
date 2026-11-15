@@ -538,8 +538,8 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
     // Waehrend der Trajektorie keine weiteren Fahrbefehle - sie wuerden das
     // Ziel des Players ueberschreiben. Abbrechen geht mit ARM_STOP/ARM_INHIBIT.
     if (arm_traj_.active()) {
-        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X ignoriert - Trajektorie laeuft an "
-                      "Gelenk %u (abbrechen: ARM_STOP).\n", cmd.opcode, arm_traj_.node());
+        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X ignoriert - Trajektorie laeuft "
+                      "(abbrechen: ARM_STOP).\n", cmd.opcode);
         return true;
     }
 
@@ -597,13 +597,23 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
             return true;
         }
 
-        case UplinkOpcode::ARM_TRAJ_TEST:
-            // Nur genau dieses eine Gelenk (Node 0 = "alle" ist oben schon
-            // abgewiesen). Freigabe des Einzelgelenk-Trajektorientests durch
-            // das Team, siehe arm_traj_player.hpp.
-            Serial.printf("INFO  [System]: TC ARM_TRAJ_TEST Gelenk %u\n", node);
-            arm_traj_.start(*arm_, node, millis());
+        case UplinkOpcode::ARM_TRAJ_TEST: {
+            // High-Byte = Gelenk fuer Spalte 1, Low-Byte = Gelenk fuer Spalte 2
+            // (0 = nur ein Gelenk). Node 0 = "alle" ist oben schon abgewiesen.
+            // Hoechstens zwei Gelenke - Freigabe des Teams, CLAUDE.md Regel 2.
+            const uint8_t node2 = armValue(cmd);
+            if (node2 > ARM_MAX_JOINTS) {
+                Serial.printf("WARN  [System]: ARM_TRAJ_TEST mit ungueltigem 2. Gelenk %u - ignoriert.\n",
+                              node2);
+                return true;
+            }
+            const uint8_t nodes[2] = { node, node2 };
+            const uint8_t count = node2 ? 2 : 1;
+            Serial.printf("INFO  [System]: TC ARM_TRAJ_TEST Gelenk %u%s", node, node2 ? " + " : "\n");
+            if (node2) Serial.printf("%u\n", node2);
+            arm_traj_.start(*arm_, nodes, count, millis());
             return true;
+        }
 
         default:
             return false;
@@ -979,7 +989,7 @@ void System::handleUplink(uint32_t now_ms) {
                               stop ? "ARM_STOP" : "ARM_INHIBIT", node, node == 0 ? " (alle)" : "");
                 // Laufende Trajektorie zuerst beenden, sonst schickt der
                 // Player im naechsten Takt schon wieder ein Ziel.
-                if (node == 0 || node == arm_traj_.node()) {
+                if (node == 0 || arm_traj_.uses(node)) {
                     arm_traj_.cancel(stop ? "ARM_STOP" : "ARM_INHIBIT");
                 }
                 if (!arm_ || !arm_ready_) continue;

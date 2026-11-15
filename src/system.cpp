@@ -253,6 +253,8 @@ void System::run() {
             arm_traj_.update(*arm_, now);
         }
     }
+    // Phasenwechsel und Abbruch sofort melden (sonst 1 Hz mit SYS).
+    if (arm_traj_.takeChanged()) sendArmTrajStatus();
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
     if (motor_)  motor_->update();
@@ -462,6 +464,15 @@ void System::handleSystemTelemetry(uint32_t now_ms) {
 
     // Arm-Link-Statistik: zeigt am Boden, ob die RCU ueberhaupt antwortet.
     if (arm_ && arm_ready_) downlink_->sendArmLink(*arm_, now_ms);
+    sendArmTrajStatus();
+}
+
+void System::sendArmTrajStatus() {
+    if (!downlink_ready_ || !downlink_ || !arm_ || !arm_ready_) return;
+    downlink_->sendArmTraj(static_cast<uint8_t>(arm_traj_.phase()),
+                           static_cast<uint8_t>(arm_traj_.result()),
+                           arm_traj_.resultNode(), arm_traj_.step(),
+                           arm_traj_.maxErrDeg(), arm_traj_.runs());
 }
 
 // ---------------------------------------------------------------------------
@@ -589,11 +600,18 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
                               node);
                 return true;
             }
-            // Beschleunigung = Geschwindigkeit pro Sekunde: in 1 s auf Endtempo.
-            const uint32_t urad_s = static_cast<uint32_t>(lroundf(deg_s * URAD_PER_DEG));
-            Serial.printf("INFO  [System]: TC ARM_SET_VELOCITY Gelenk %u auf %u Grad/s\n",
-                          node, deg_s);
-            arm_->sendSetVelocity(node, urad_s, urad_s);
+            // sendSetVelocity rechnet in urad/s und urad/s^2 um.
+            // Vorgabe Team: hoechstens 6 Grad/s und 2 Grad/s^2 (RCU-Standard) -
+            // dieselben Grenzen wie der Trajektorientest.
+            if (deg_s > ARM_JOG_MAX_VEL_DEG_S) {
+                Serial.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit %u Grad/s ueber %u - ignoriert.\n",
+                              node, deg_s, ARM_JOG_MAX_VEL_DEG_S);
+                return true;
+            }
+            const uint8_t accel = deg_s < ARM_JOG_MAX_ACCEL_DEG_S2 ? deg_s : ARM_JOG_MAX_ACCEL_DEG_S2;
+            Serial.printf("INFO  [System]: TC ARM_SET_VELOCITY Gelenk %u auf %u Grad/s, %u Grad/s^2\n",
+                          node, deg_s, accel);
+            arm_->sendSetVelocity(node, deg_s, accel);
             return true;
         }
 

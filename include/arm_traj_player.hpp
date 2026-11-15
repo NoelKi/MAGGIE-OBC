@@ -44,19 +44,25 @@ public:
     static constexpr uint8_t  MAX_JOINTS       = 2;
     /// Groesste Auslenkung um den Startwinkel - gleich ARM_JOG_MAX_DEG.
     static constexpr float    MAX_DEG          = 30.0f;
-    /// Hoechste Geschwindigkeit, die der Player je setzt.
-    static constexpr float    MAX_VEL_DEG_S    = 20.0f;
-    /// Kleinste Geschwindigkeit (0 waere fuer die RCU unzulaessig/undefiniert).
+    /// Hoechste Geschwindigkeit, die der Player je setzt (Vorgabe Team,
+    /// 15.11.2026: 10 Grad/s).
+    static constexpr float    MAX_VEL_DEG_S    = 10.0f;
+    /// Kleinste Geschwindigkeit (0 waere "steht").
     static constexpr float    MIN_VEL_DEG_S    = 0.5f;
-    /// Beschleunigung fuer alle Abschnitte.
-    static constexpr float    ACCEL_DEG_S2     = 40.0f;
+    /// Beschleunigung fuer alle Abschnitte (Vorgabe Team, 15.11.2026:
+    /// 4 Grad/s^2). Die Bahn darf nicht mehr verlangen - das Skript lehnt
+    /// sie sonst ab (--slowdown).
+    static constexpr float    ACCEL_DEG_S2     = 4.0f;
     /// Zielvorlauf in Tabellenschritten (2 x 100 ms).
     static constexpr uint8_t  LEAD             = 2;
     /// Langsame Fahrt beim Halten vor dem Start und auf den Startwinkel zurueck.
     static constexpr float    SLOW_VEL_DEG_S   = 5.0f;
 
-    static constexpr uint32_t SETTLE_MS        = 500;
-    static constexpr float    SETTLE_TOL_DEG   = 2.0f;
+    /// Halten vor dem Start. Erster Test (15.11.2026): Bei abweichendem Bezug
+    /// laeuft das Gelenk langsam an (~1 Grad/s^2) - in 500 ms waren das nur
+    /// 0,04 Grad, erst nach ~2 s waren es 2 Grad. Deshalb laenger und enger.
+    static constexpr uint32_t SETTLE_MS        = 1500;
+    static constexpr float    SETTLE_TOL_DEG   = 0.5f;
     /// Schleppfehler, ab dem nach TRACK_ERR_MS abgebrochen wird.
     static constexpr float    TRACK_ERR_DEG    = 8.0f;
     static constexpr uint32_t TRACK_ERR_MS     = 1000;
@@ -82,8 +88,36 @@ public:
     /// Ist diese Node an der laufenden Fahrt beteiligt?
     bool uses(uint8_t node) const;
 
+    // -----------------------------------------------------------------------
+    // Status fuer die Telemetrie (SYS/ARM_TRAJ). Werte gehen ueber die
+    // Leitung - Gegenstueck: _decode_sys_arm_traj im Server.
+    // -----------------------------------------------------------------------
+    enum class Phase : uint8_t { IDLE = 0, SETTLE = 1, RUN = 2, FINISH = 3 };
+
+    /// Ergebnis des letzten Laufs (bleibt stehen, bis der naechste startet).
+    enum class Result : uint8_t {
+        NONE          = 0,   ///< seit dem Booten nicht gestartet
+        RUNNING       = 1,
+        DONE          = 2,   ///< fertig, alle Gelenke am Startwinkel
+        SETTLE_MOVED  = 3,   ///< bewegt sich beim Halten (Bezug MOVE_ABS)
+        NO_STATE      = 4,   ///< keine JOINT_STATE mehr
+        TRACK_ERROR   = 5,   ///< Schleppfehler zu gross
+        TX_FULL       = 6,   ///< TX-Puffer voll
+        FINISH_TIMEOUT = 7,  ///< Startwinkel nicht erreicht
+        CANCELLED     = 8,   ///< ARM_STOP/ARM_INHIBIT, TEST verlassen, ABORT
+        REFUSED       = 9,   ///< Start abgelehnt (Tabelle, Gelenk, Link)
+    };
+
+    Phase    phase()      const { return phase_; }
+    Result   result()     const { return result_; }
+    uint8_t  resultNode() const { return result_node_; }   ///< Gelenk, das den Abbruch ausgeloest hat (0 = keins)
+    uint16_t step()       const { return step_; }          ///< aktueller Tabellenschritt
+    float    maxErrDeg()  const { return max_err_deg_; }   ///< groesster Schleppfehler im Lauf
+    uint8_t  runs()       const { return runs_; }          ///< Startversuche seit dem Booten
+    /// Seit dem letzten Abruf geaendert (Phase/Ergebnis) - fuer sofortiges Senden.
+    bool     takeChanged() { const bool c = changed_; changed_ = false; return c; }
+
 private:
-    enum class Phase : uint8_t { IDLE, SETTLE, RUN, FINISH };
 
     struct Joint {
         uint8_t  node      = 0;
@@ -98,7 +132,18 @@ private:
     int32_t  last_step_   = -1;    ///< zuletzt gesendeter Tabellenschritt
     uint32_t last_log_ms_ = 0;
 
-    void abort(ArmLink& arm, const char* reason, uint8_t node);
+    Result   result_      = Result::NONE;
+    uint8_t  result_node_ = 0;
+    uint16_t step_        = 0;
+    float    max_err_deg_ = 0.0f;
+    uint8_t  runs_        = 0;
+    bool     changed_     = false;
+
+    void setPhase(Phase p) { phase_ = p; changed_ = true; }
+    void finish(Result r, uint8_t node) { result_ = r; result_node_ = node; setPhase(Phase::IDLE); }
+    bool refuse() { result_ = Result::REFUSED; result_node_ = 0; changed_ = true; return false; }
+
+    void abort(ArmLink& arm, const char* reason, uint8_t node, Result r);
     bool sendTarget(ArmLink& arm, const Joint& j, int32_t offset_urad, float vel_deg_s);
     static bool checkTable();
 };

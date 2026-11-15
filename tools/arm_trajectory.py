@@ -20,7 +20,7 @@ aktuellen Stand herum, nicht auf die absoluten Winkel der Simulation.
 Grenzen (prüfen Skript UND Firmware), je Gelenk:
   - jeder Punkt innerhalb ±30° um den Start
   - Endpunkt = Startpunkt (fehlt das, hängt das Skript eine sanfte Rückfahrt an)
-  - höchstens 20 °/s (sonst mit --slowdown zeitlich strecken)
+  - höchstens 10 °/s und 4 °/s² (sonst mit --slowdown zeitlich strecken)
   - höchstens 2 Gelenke (Freigabe des Teams, CLAUDE.md Regel 2)
 
 Beispiele
@@ -54,9 +54,11 @@ from pathlib import Path
 DT_S = 0.1                 # Takt der ROS-CSV und des Players
 MAX_JOINTS = 2             # höchstens so viele Gelenke gleichzeitig
 MAX_DEG = 30.0             # größte Auslenkung um den Start
-MAX_VEL_DEG_S = 20.0       # höchste Geschwindigkeit
-ACCEL_DEG_S2 = 40.0        # Beschleunigung des Players (nur Hinweis)
+MAX_VEL_DEG_S = 10.0       # höchste Geschwindigkeit (Vorgabe Team)
+ACCEL_DEG_S2 = 4.0         # Beschleunigung des Players = höchste der Bahn (Vorgabe Team)
+ACCEL_WINDOW = 5           # Beschleunigung über 5 Schritte (0,5 s) gemittelt prüfen
 RETURN_VEL_DEG_S = 5.0     # Spitzengeschwindigkeit der angehängten Rückfahrt
+RETURN_MIN_S = 2.0         # Rückfahrt mindestens so lang (hält sie unter ACCEL)
 MAX_POINTS = 6000          # 10 min - Tabelle liegt im Flash
 
 URAD_PER_DEG = math.pi / 180.0 * 1e6
@@ -126,7 +128,10 @@ def append_return(cols: list[list[float]]) -> int:
     far = max(abs(c[-1]) for c in cols)
     if far < 0.01:
         return 0
-    duration = max(1.0, far * math.pi / (2.0 * RETURN_VEL_DEG_S))
+    # Kosinus über T: Spitze v = far·π/(2T), Spitze a = far·π²/(2T²) - beide begrenzen.
+    duration = max(RETURN_MIN_S,
+                   far * math.pi / (2.0 * RETURN_VEL_DEG_S),
+                   math.pi * math.sqrt(far / (2.0 * ACCEL_DEG_S2)))
     n = math.ceil(duration / DT_S)
     for c in cols:
         last = c[-1]
@@ -136,7 +141,10 @@ def append_return(cols: list[list[float]]) -> int:
 
 def stats(offsets: list[float]) -> dict:
     vel = [(b - a) / DT_S for a, b in zip(offsets, offsets[1:])]
-    acc = [(b - a) / DT_S for a, b in zip(vel, vel[1:])]
+    # Über ACCEL_WINDOW Schritte: Die Differenz zweier 0,1-s-Geschwindigkeiten
+    # rauscht stark und ist nicht das, was das Gelenk fahren muss.
+    w = ACCEL_WINDOW
+    acc = [(vel[i + w] - vel[i]) / (w * DT_S) for i in range(len(vel) - w)]
     return {
         "min": min(offsets),
         "max": max(offsets),
@@ -238,9 +246,12 @@ def cmd_convert(a: argparse.Namespace) -> None:
 
     st = [stats(c) for c in cols]
     vmax = max(s["vmax"] for s in st)
-    if vmax > MAX_VEL_DEG_S:
-        need = vmax / MAX_VEL_DEG_S * a.slowdown
-        fail(f"Höchstgeschwindigkeit {vmax:.1f}°/s > {MAX_VEL_DEG_S:.0f}°/s. "
+    amax = max(s["amax"] for s in st)
+    if vmax > MAX_VEL_DEG_S or amax > ACCEL_DEG_S2:
+        # Strecken um f teilt Geschwindigkeit durch f, Beschleunigung durch f².
+        need = a.slowdown * max(vmax / MAX_VEL_DEG_S, math.sqrt(amax / ACCEL_DEG_S2), 1.0)
+        fail(f"Bahn zu schnell: max. {vmax:.1f}°/s (erlaubt {MAX_VEL_DEG_S:.0f}), "
+             f"max. {amax:.1f}°/s² (erlaubt {ACCEL_DEG_S2:.0f}). "
              f"Mit --slowdown {math.ceil(need * 10) / 10:.1f} (oder mehr) zeitlich strecken.")
 
     urad = [[int(round(v * URAD_PER_DEG)) for v in c] for c in cols]
@@ -251,10 +262,7 @@ def cmd_convert(a: argparse.Namespace) -> None:
     print(f"  {len(cols[0])} Punkte = {len(cols[0]) * DT_S:.1f} s, {len(cols)} Gelenk(e)")
     for s, j in zip(st, a.joints):
         print(f"  Spalte {j}: {s['min']:+.2f}° .. {s['max']:+.2f}° um den Start, "
-              f"max. {s['vmax']:.1f}°/s, max. {s['amax']:.0f}°/s²")
-        if s["amax"] > ACCEL_DEG_S2:
-            print(f"    Hinweis: Beschleunigung über {ACCEL_DEG_S2:.0f}°/s² (Player) - "
-                  f"dort läuft das Gelenk etwas nach.")
+              f"max. {s['vmax']:.1f}°/s, max. {s['amax']:.1f}°/s²")
     if n_return:
         print(f"  Ende != Start: Rückfahrt mit {n_return} Punkten ({n_return * DT_S:.1f} s) angehängt.")
     print("Nächster Schritt: Firmware bauen und flashen (pio run -t upload).")
@@ -266,10 +274,11 @@ def cmd_convert(a: argparse.Namespace) -> None:
 
 
 def cmd_example(a: argparse.Namespace) -> None:
-    """Beispiel im ROS-Format: 3 Gelenke, rad, 0,1 s, 20 s. Absolutwerte am
+    """Beispiel im ROS-Format: 3 Gelenke, rad, 0,1 s, 40 s. Absolutwerte am
     Anfang zählen nicht (der OBC fährt relativ). Gelenk 1 schwenkt auf etwa
-    ±18°, Gelenk 2 versetzt dazu auf etwa ±12°; beide starten und enden in Ruhe."""
-    n = 201
+    ±18°, Gelenk 2 versetzt dazu auf etwa ±13°; beide starten und enden in
+    Ruhe. Langsam genug für 10 °/s und 4 °/s²."""
+    n = 401
     with open(a.output, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["joint1", "joint2", "joint3"])

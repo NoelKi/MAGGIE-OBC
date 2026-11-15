@@ -85,7 +85,7 @@ enum class ArmMsg : uint8_t {
     STEPPER_MOVE_ABS     = 0x07,   ///< int32 urad, absolut
     STEPPER_MOVE_STEPS   = 0x08,
     RESET                = 0x09,
-    STEPPER_SET_VELOCITY = 0x0A,   ///< uint32 urad/s + uint32 urad/s^2
+    STEPPER_SET_VELOCITY = 0x0A,   ///< uint32 urad/s + uint32 urad/s^2 (RCU-Standard 6 Grad/s / 2 Grad/s^2)
     SET_HOME             = 0x0B,
     INITIATE_LSS_SCAN    = 0x0C,
     SET_NODE_ID          = 0x0D,
@@ -151,7 +151,11 @@ public:
     /// Absolutes Ziel. Waehrend einer Fahrt aendert es nur das Ziel, das
     /// Modul haelt dafuer nicht an (am Gelenk bestaetigt).
     bool sendMoveAbs(uint8_t node, int32_t angle_urad);
-    bool sendSetVelocity(uint8_t node, uint32_t speed_urad_s, uint32_t accel_urad_s2);
+    /// Geschwindigkeit und Beschleunigung, Angabe in Grad/s bzw. Grad/s^2.
+    /// Auf der Leitung gehen urad/s und urad/s^2 (uint32) - Test 15.11.2026:
+    /// ganze Grad/s liessen das Gelenk nur kriechen (state "faehrt", ~0 Grad/s),
+    /// urad-Werte fuhren es. Standard der RCU: 6 Grad/s, 2 Grad/s^2.
+    bool sendSetVelocity(uint8_t node, float speed_deg_s, float accel_deg_s2);
 
     /// STOP bzw. INHIBIT an alle Gelenke 1..ARM_MAX_JOINTS.
     void stopAll();

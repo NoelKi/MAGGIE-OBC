@@ -215,10 +215,15 @@ bool ArmLink::sendMoveAbs(uint8_t node, int32_t angle_urad) {
     return send(node, ArmMsg::STEPPER_MOVE_ABS, p, sizeof(p));
 }
 
-bool ArmLink::sendSetVelocity(uint8_t node, uint32_t speed_urad_s, uint32_t accel_urad_s2) {
+bool ArmLink::sendSetVelocity(uint8_t node, float speed_deg_s, float accel_deg_s2) {
+    // Auf der Leitung urad/s und urad/s^2 (Test 15.11.2026: ganze Grad/s
+    // liess das Gelenk nur kriechen, urad-Werte fuhren es).
+    static constexpr float URAD_PER_DEG = 17453.2925f;
+    if (speed_deg_s < 0.0f) speed_deg_s = 0.0f;
+    if (accel_deg_s2 < 0.0f) accel_deg_s2 = 0.0f;
     uint8_t p[8];
-    writeU32(&p[0], speed_urad_s);
-    writeU32(&p[4], accel_urad_s2);
+    writeU32(&p[0], static_cast<uint32_t>(speed_deg_s * URAD_PER_DEG + 0.5f));
+    writeU32(&p[4], static_cast<uint32_t>(accel_deg_s2 * URAD_PER_DEG + 0.5f));
     return send(node, ArmMsg::STEPPER_SET_VELOCITY, p, sizeof(p));
 }
 

@@ -90,7 +90,10 @@ void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
     if (sd_only) return;   // Ereignis-Frames: kein UART, kein Zaehler
 
     // UART: nie blockieren (write() wuerde warten, bis Platz ist). Zwei Spuren:
-    //  - SYS-Frames (Zustand, REXUS-Signale): immer, sobald das Frame passt.
+    //  - SYS-Frames (Zustand, REXUS-Signale) und ARM/JOINT: immer, sobald das
+    //    Frame passt. ARM/JOINT, weil die Gelenkwinkel sonst in der vollen
+    //    Leitung untergehen (Test 15.11.2026: kein einziges Frame in 5 min) -
+    //    hoechstens ARM_MAX_JOINTS x 5 Hz und nur bei neuem Wert, real ~200 B/s.
     //  - Alles andere (IMU, Kraft, Motor): nur solange die Warteschlange kurz
     //    ist (DOWNLINK_NORMAL_QUEUE_MAX). Sonst stuende ein SYS-Frame hinter
     //    hunderten Byte Sensordaten an - und waere bei voller Leitung so oft
@@ -99,7 +102,10 @@ void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
     const int free_bytes = serial_.availableForWrite();
     if (free_bytes > tx_capacity_) tx_capacity_ = free_bytes;   // leerer Puffer = Kapazitaet
     const int queued = tx_capacity_ - free_bytes;
-    const bool priority = msgid1 == static_cast<uint8_t>(DownlinkSubsystem::SYS);
+    const bool priority =
+        msgid1 == static_cast<uint8_t>(DownlinkSubsystem::SYS) ||
+        (msgid1 == static_cast<uint8_t>(DownlinkSubsystem::ARM) &&
+         msgid2 == static_cast<uint8_t>(DownlinkArmMsg::JOINT));
 
     const bool send = priority
         ? free_bytes >= DOWNLINK_FRAME_SIZE
@@ -286,6 +292,27 @@ void TelemetryDownlink::sendArmLink(const ArmLink& link, uint32_t now_ms) {
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
               static_cast<uint8_t>(DownlinkSysMsg::ARM_LINK),
               0, data, 0, status2);
+}
+
+void TelemetryDownlink::sendArmTraj(uint8_t phase, uint8_t result, uint8_t node, uint16_t step,
+                                    float max_err_deg, uint8_t runs) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [phase result node step(uint16 BE) max_err(uint16 BE, 0,01 Grad) runs]
+    data[0] = phase;
+    data[1] = result;
+    data[2] = node;
+    putU16(&data[3], step);
+    float cdeg = max_err_deg * 100.0f + 0.5f;
+    if (cdeg < 0.0f) cdeg = 0.0f;
+    if (cdeg > 65535.0f) cdeg = 65535.0f;
+    putU16(&data[5], static_cast<uint16_t>(cdeg));
+    data[7] = runs;
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::ARM_TRAJ),
+              0, data, 0, 0);
 }
 
 void TelemetryDownlink::sendUplinkStats(uint32_t rx_bytes, uint16_t frames_ok,

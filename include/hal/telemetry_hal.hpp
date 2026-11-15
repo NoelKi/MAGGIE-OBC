@@ -177,6 +177,7 @@ enum class DownlinkSysMsg : uint8_t {
     UPLINK     = 0x02,   ///< Empfangsstatistik des Telecommand-Uplinks
     UPLINK_RAW = 0x03,   ///< Rohe Kopfbytes des zuletzt empfangenen Uplink-Bursts
     ARM_LINK   = 0x04,   ///< Empfangsstatistik der Arm-UART (SYS = Vorrangspur)
+    ARM_TRAJ   = 0x05,   ///< Status des Trajektorientests (ArmTrajPlayer)
 };
 
 // SYS/ARM_LINK - flags, uebertragen in STATUS2
@@ -336,6 +337,16 @@ public:
      * antwortet, muss auch bei voller Leitung am Boden ankommen.
      */
     void sendArmLink(const ArmLink& link, uint32_t now_ms);
+
+    /**
+     * @brief SYS/ARM_TRAJ: Status des Trajektorientests (ArmTrajPlayer).
+     *
+     * DATA: [phase result node step(uint16 BE) max_err(uint16 BE, 0,01 Grad,
+     *        gesaettigt) runs]. Werte von phase/result: ArmTrajPlayer::Phase
+     * bzw. ::Result. node = Gelenk, das den Abbruch ausgeloest hat (0 = keins).
+     */
+    void sendArmTraj(uint8_t phase, uint8_t result, uint8_t node, uint16_t step,
+                     float max_err_deg, uint8_t runs);
 
     /**
      * @brief Ereignis-Frame NUR fuer die SD-Karte (EVENT/STATE).

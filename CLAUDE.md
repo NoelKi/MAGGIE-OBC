@@ -31,7 +31,7 @@ Mikrogravitation getestet.
   - der **Trajektorientest mit höchstens zwei Gelenken** im Testaufbau
     (`ARM_TRAJ_TEST`, `ArmTrajPlayer`, `tools/arm_trajectory.py`): nur in TEST,
     je Gelenk höchstens ±30° um den Startwinkel, Ende = Start, höchstens
-    20 °/s, Abbruch mit STOP + INHIBIT bei Schleppfehler oder fehlender
+    10 °/s und 4 °/s², Abbruch mit STOP + INHIBIT bei Schleppfehler oder fehlender
     Rückmeldung. Vom Team am 15.11.2026 für den aktuellen Testaufbau
     freigegeben (z. Zt. Gelenk 1 = Node 5, Gelenk 2 = Node 6).
 - Keinen Code, keine Skripte und keine Befehle vorschlagen oder ausführen, die

@@ -110,6 +110,11 @@ private:
     /// Schritten. Ein Tippfehler im Winkel soll das Gelenk nicht in den
     /// Anschlag fahren. Gegenstueck: ARM_JOG_MAX_DEG im Server.
     static constexpr int8_t ARM_JOG_MAX_DEG = 30;
+    /// Hoechste Geschwindigkeit/Beschleunigung fuer ARM_SET_VELOCITY (Vorgabe
+    /// Team, 15.11.2026: 10 Grad/s, 4 Grad/s^2). Gegenstueck:
+    /// ARM_SPEED_MAX_DEG_S im Server und ARM_SPEED_MAX in der GS.
+    static constexpr uint8_t ARM_JOG_MAX_VEL_DEG_S    = 10;
+    static constexpr uint8_t ARM_JOG_MAX_ACCEL_DEG_S2 = 4;
 
     // -----------------------------------------------------------------------
     // Laufzeitbegrenzung des Motors
@@ -212,6 +217,8 @@ private:
 
     /// Arm-Telemetrie in den Downlink (Raten: data_rates.hpp, ARM_*).
     void handleArmTelemetry(uint32_t now_ms);
+    /// SYS/ARM_TRAJ: Status des Trajektorientests in den Downlink.
+    void sendArmTrajStatus();
     /// Arm-Telecommand (0x3x) ausfuehren. false = kein Arm-Opcode.
     /// Die Zustandspruefung (TEST-Sperre) macht der Aufrufer.
     bool handleArmCommand(const UplinkCommand& cmd);

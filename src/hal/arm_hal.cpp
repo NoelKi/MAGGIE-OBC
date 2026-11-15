@@ -209,6 +209,12 @@ bool ArmLink::sendMoveRel(uint8_t node, int32_t angle_urad) {
     return send(node, ArmMsg::STEPPER_MOVE_REL, p, sizeof(p));
 }
 
+bool ArmLink::sendMoveAbs(uint8_t node, int32_t angle_urad) {
+    uint8_t p[4];
+    writeU32(p, static_cast<uint32_t>(angle_urad));
+    return send(node, ArmMsg::STEPPER_MOVE_ABS, p, sizeof(p));
+}
+
 bool ArmLink::sendSetVelocity(uint8_t node, uint32_t speed_urad_s, uint32_t accel_urad_s2) {
     uint8_t p[8];
     writeU32(&p[0], speed_urad_s);

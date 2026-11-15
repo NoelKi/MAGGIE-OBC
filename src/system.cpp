@@ -243,6 +243,17 @@ void System::run() {
     handleStateMachine(now);
     handleFlight(now);
 
+    // Trajektorien-Test an einem Gelenk. Laeuft nur in TEST: Beim Verlassen
+    // beendet stopArm() ihn; die Abfrage hier ist die zweite Sicherung.
+    if (arm_traj_.active()) {
+        if (!state_machine_.actuatorsUnlocked()) {
+            arm_traj_.cancel("Zustand nicht mehr TEST");
+            stopArm();
+        } else if (arm_ && arm_ready_) {
+            arm_traj_.update(*arm_, now);
+        }
+    }
+
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
     if (motor_)  motor_->update();
     if (motor2_) motor2_->update();
@@ -261,8 +272,19 @@ void System::run() {
     }
     if (now - last_motor_telemetry_ms_ >= rates::MOTOR_INTERVAL_MS) {
         last_motor_telemetry_ms_ = now;
-        handleMotorTelemetry(motor_,  motor_ready_,  DownlinkMotorMsg::STATE);
-        handleMotorTelemetry(motor2_, motor2_ready_, DownlinkMotorMsg::STATE2);
+        // Reihenfolge jedes Mal tauschen: Der Downlink ist ueberbucht (siehe
+        // data_rates.hpp), und das ZWEITE Frame eines Paars findet die
+        // Warteschlange fast immer voll vor. Mit fester Reihenfolge kam Motor 2
+        // so nur mit ~1 Frame alle 4 s an (Motor 1: ~4/s) - die GUI sah den
+        // Zustand "laeuft" nicht und schickte neue PWM-Sollwerte nicht ab.
+        motor2_telemetry_first_ = !motor2_telemetry_first_;
+        if (motor2_telemetry_first_) {
+            handleMotorTelemetry(motor2_, motor2_ready_, DownlinkMotorMsg::STATE2);
+            handleMotorTelemetry(motor_,  motor_ready_,  DownlinkMotorMsg::STATE);
+        } else {
+            handleMotorTelemetry(motor_,  motor_ready_,  DownlinkMotorMsg::STATE);
+            handleMotorTelemetry(motor2_, motor2_ready_, DownlinkMotorMsg::STATE2);
+        }
     }
 
     // Zustand + Subsystem-Gesundheit langsamer hinterherschicken (1 Hz)
@@ -487,6 +509,7 @@ void System::handleArmTelemetry(uint32_t now_ms) {
 }
 
 void System::stopArm() {
+    arm_traj_.cancel("Arm gestoppt (TEST verlassen / ABORT)");
     if (!arm_ || !arm_ready_) return;
     arm_->stopAll();
     arm_->inhibitAll();
@@ -505,11 +528,18 @@ static uint8_t armValue(const UplinkCommand& cmd) {
 bool System::handleArmCommand(const UplinkCommand& cmd) {
     const UplinkOpcode op = static_cast<UplinkOpcode>(cmd.opcode);
     if (op != UplinkOpcode::ARM_RELEASE && op != UplinkOpcode::ARM_JOG &&
-        op != UplinkOpcode::ARM_SET_VELOCITY) {
+        op != UplinkOpcode::ARM_SET_VELOCITY && op != UplinkOpcode::ARM_TRAJ_TEST) {
         return false;
     }
     if (!arm_ || !arm_ready_) {
         Serial.println("WARN  [System]: Arm-Telecommand ignoriert - Arm-UART nicht bereit.");
+        return true;
+    }
+    // Waehrend der Trajektorie keine weiteren Fahrbefehle - sie wuerden das
+    // Ziel des Players ueberschreiben. Abbrechen geht mit ARM_STOP/ARM_INHIBIT.
+    if (arm_traj_.active()) {
+        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X ignoriert - Trajektorie laeuft an "
+                      "Gelenk %u (abbrechen: ARM_STOP).\n", cmd.opcode, arm_traj_.node());
         return true;
     }
 
@@ -535,8 +565,19 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
                 return true;
             }
             const int32_t urad = static_cast<int32_t>(lroundf(deg * URAD_PER_DEG));
-            Serial.printf("INFO  [System]: TC ARM_JOG Gelenk %u um %d Grad (%ld urad)\n",
-                          node, deg, static_cast<long>(urad));
+            // Das Modul nimmt einen Fahrbefehl nur direkt nach RELEASE an -
+            // deshalb geht vor JEDEM Jog ein RELEASE an dasselbe Gelenk. Beide
+            // Frames liegen direkt hintereinander im TX-Puffer, die RCU bekommt
+            // sie also immer in dieser Reihenfolge. Passt RELEASE nicht mehr in
+            // den Puffer, unterbleibt auch der Jog (sonst faehrt er ins Leere).
+            // Lockert keine Sperre: ARM_JOG kommt hier nur in TEST an.
+            Serial.printf("INFO  [System]: TC ARM_JOG Gelenk %u um %d Grad (%ld urad), "
+                          "vorher RELEASE\n", node, deg, static_cast<long>(urad));
+            if (!arm_->sendCommand(node, ArmMsg::RELEASE)) {
+                Serial.printf("WARN  [System]: ARM_JOG Gelenk %u - RELEASE passte nicht in "
+                              "den TX-Puffer, Jog nicht gesendet.\n", node);
+                return true;
+            }
             arm_->sendMoveRel(node, urad);
             return true;
         }
@@ -555,6 +596,14 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
             arm_->sendSetVelocity(node, urad_s, urad_s);
             return true;
         }
+
+        case UplinkOpcode::ARM_TRAJ_TEST:
+            // Nur genau dieses eine Gelenk (Node 0 = "alle" ist oben schon
+            // abgewiesen). Freigabe des Einzelgelenk-Trajektorientests durch
+            // das Team, siehe arm_traj_player.hpp.
+            Serial.printf("INFO  [System]: TC ARM_TRAJ_TEST Gelenk %u\n", node);
+            arm_traj_.start(*arm_, node, millis());
+            return true;
 
         default:
             return false;
@@ -928,6 +977,11 @@ void System::handleUplink(uint32_t now_ms) {
                 const uint8_t node = armNode(cmd);
                 Serial.printf("INFO  [System]: TC %s Gelenk %u%s\n",
                               stop ? "ARM_STOP" : "ARM_INHIBIT", node, node == 0 ? " (alle)" : "");
+                // Laufende Trajektorie zuerst beenden, sonst schickt der
+                // Player im naechsten Takt schon wieder ein Ziel.
+                if (node == 0 || node == arm_traj_.node()) {
+                    arm_traj_.cancel(stop ? "ARM_STOP" : "ARM_INHIBIT");
+                }
                 if (!arm_ || !arm_ready_) continue;
                 if (node == 0) {
                     if (stop) arm_->stopAll(); else arm_->inhibitAll();

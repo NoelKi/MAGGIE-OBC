@@ -148,6 +148,9 @@ public:
     // -----------------------------------------------------------------------
     bool sendCommand(uint8_t node, ArmMsg msg);
     bool sendMoveRel(uint8_t node, int32_t angle_urad);
+    /// Absolutes Ziel. Waehrend einer Fahrt aendert es nur das Ziel, das
+    /// Modul haelt dafuer nicht an (am Gelenk bestaetigt).
+    bool sendMoveAbs(uint8_t node, int32_t angle_urad);
     bool sendSetVelocity(uint8_t node, uint32_t speed_urad_s, uint32_t accel_urad_s2);
 
     /// STOP bzw. INHIBIT an alle Gelenke 1..ARM_MAX_JOINTS.

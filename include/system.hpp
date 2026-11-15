@@ -7,6 +7,7 @@
 #include "hal/uplink_hal.hpp"
 #include "hal/rexus_hal.hpp"
 #include "hal/arm_hal.hpp"
+#include "arm_traj_player.hpp"
 #include "statemachine/state_machine.hpp"
 #include "storage/persistent_state.hpp"
 #include "storage/sd_logger.hpp"
@@ -69,6 +70,7 @@ private:
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
     ArmLink* arm_ = nullptr;                            ///< UART zur RCU des Roboterarms (Serial1)
+    ArmTrajPlayer arm_traj_;                            ///< Trajektorien-Test an einem Gelenk (nur TEST)
     PersistentState persist_;                           ///< Zustand + Boot-Zaehler (EEPROM)
     SdLogger sd_;                                       ///< Bordspeicher (SD-Karte)
 
@@ -117,6 +119,7 @@ private:
     static constexpr uint32_t MOTOR_ON_TIMEOUT_MS = 30000;
     uint32_t motor_on_since_ms_  = 0;       ///< Zeitpunkt des letzten MOTOR_ON
     uint32_t motor2_on_since_ms_ = 0;       ///< Zeitpunkt des letzten MOTOR2_ON
+    bool motor2_telemetry_first_ = false;   ///< Motor-Telemetrie abwechselnd zuerst senden
 
     // Kein Subsystem-Fehler ist fatal: der OBC laeuft degradiert weiter, statt
     // z.B. wegen eines fehlenden Motors auch die Telemetrie abzuschalten.

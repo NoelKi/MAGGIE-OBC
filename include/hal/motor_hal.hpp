@@ -360,8 +360,8 @@ private:
     // im Flug.
     static constexpr long     SOFT_APPROACH_WINDOW_COUNTS = 300;  // ~24 Grad bei 4550 Counts/U
     static constexpr uint32_t SOFT_APPROACH_STALL_MS       = 150;
-    static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 140;
-    static constexpr int16_t  SOFT_APPROACH_SPEED          = 170;
+    static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 170;
+    static constexpr int16_t  SOFT_APPROACH_SPEED          = 180;
 
     // -----------------------------------------------------------------------
     // Andrehimpuls (Kick) beim Anfahren

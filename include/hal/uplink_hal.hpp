@@ -41,6 +41,11 @@ static constexpr uint8_t UPLINK_FRAME_SIZE = 6;
  * 0x0x = Motor/HDRM (nur im TEST-Zustand ausgeführt, siehe StateMachine)
  * 0x1x = System/Zustandsmaschine
  * 0x2x = Sensoren
+ * 0x3x = Roboterarm (an die RCU weitergereicht, siehe arm_hal.hpp)
+ *
+ * ARG der Arm-Kommandos: High-Byte = Gelenk (Node-ID 1..ARM_MAX_JOINTS),
+ * Low-Byte = Wert (siehe je Opcode). Gelenk 0 heisst "alle" und ist nur bei
+ * STOP und INHIBIT erlaubt - also nur in die sichere Richtung.
  */
 enum class UplinkOpcode : uint8_t {
     MOTOR_OFF       = 0x00,   ///< Motor ausschalten
@@ -72,6 +77,24 @@ enum class UplinkOpcode : uint8_t {
     /// Kraftsensor nullen (Zellen muessen frei sein).
     /// ARG: 0 = beide, 1 = Kraftsensor 1, 2 = Kraftsensor 2.
     FORCE_TARE      = 0x20,
+
+    /// Gelenk sofort anhalten (ICD STOP). Sicherheitskommando wie MOTOR_OFF:
+    /// in allen Bodenzustaenden und in ARMED. Gelenk 0 = alle.
+    ARM_STOP         = 0x30,
+    /// Gelenk sperren (ICD INHIBIT, Fahrbefehle werden ignoriert).
+    /// Erlaubt wie ARM_STOP. Gelenk 0 = alle.
+    ARM_INHIBIT      = 0x31,
+    /// Gelenk freigeben (ICD RELEASE) - Voraussetzung fuer ARM_JOG. Nur TEST.
+    ARM_RELEASE      = 0x32,
+    /// Gelenk relativ drehen (ICD STEPPER_MOVE_REL). Low-Byte = int8 Grad,
+    /// begrenzt auf +-ARM_JOG_MAX_DEG (system.hpp). Nur TEST.
+    ARM_JOG          = 0x33,
+    /// Geschwindigkeit setzen (ICD STEPPER_SET_VELOCITY). Low-Byte = uint8
+    /// Grad/s (1..255), Beschleunigung = derselbe Wert pro s. Nur TEST.
+    ARM_SET_VELOCITY = 0x34,
+    /// LED des Gelenks blinken lassen (ICD BLINK) - zur Zuordnung Node-ID zu
+    /// Gelenk. Bewegt nichts, deshalb in allen Bodenzustaenden.
+    ARM_BLINK        = 0x35,
 };
 
 struct UplinkCommand {

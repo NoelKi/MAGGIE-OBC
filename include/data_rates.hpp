@@ -49,4 +49,26 @@ constexpr uint32_t SYS_INTERVAL_MS   = 1000;   // 1 Hz
 /// Ein Versuch mit 115200 (2026-10-26) lief am Aufbau NICHT.
 constexpr uint32_t DOWNLINK_BAUDRATE = 38400;
 
+// ---------------------------------------------------------------------------
+// Roboterarm (siehe arm_hal.hpp). Alles geht zusaetzlich auf die SD-Karte.
+// Der Downlink ist schon voll (siehe oben) - die Arm-Frames laufen in der
+// normalen Spur und werden bei voller Leitung wie die Sensordaten verworfen.
+// Die Raten sind deshalb bewusst niedrig.
+// ---------------------------------------------------------------------------
+
+/// Baudrate der UART zur RCU (Serial1). UNBESTAETIGT: Die ICD legt sie nicht
+/// fest (bei LISA-ODISEE laeuft die UART ueber USB). Am Arm pruefen - laeuft
+/// nichts, zeigt die Link-Statistik (SYS/ARM_LINK) frames_ok = 0, bei falscher
+/// Baudrate meist steigende frames_bad.
+constexpr uint32_t ARM_BAUDRATE = 115200;
+
+/// Gelenkzustand je Gelenk, nur wenn seit dem letzten Frame ein neuer kam.
+constexpr uint32_t ARM_JOINT_INTERVAL_MS = 200;   // 5 Hz
+
+/// RCU-IMU (Accel + Gyro), gedrosselt. Die RCU sendet ~104 Hz.
+constexpr uint32_t ARM_IMU_INTERVAL_MS   = 200;   // 5 Hz
+
+/// Spannung + Temperatur je Gelenk, nur bei neuem Wert.
+constexpr uint32_t ARM_POWER_INTERVAL_MS = 1000;  // 1 Hz
+
 }  // namespace rates

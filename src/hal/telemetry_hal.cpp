@@ -191,6 +191,103 @@ void TelemetryDownlink::sendUplinkRaw(const uint8_t* bytes, uint8_t len) {
               0, data, 0, len);   // STATUS2 traegt die gueltige Laenge
 }
 
+// ---------------------------------------------------------------------------
+// Roboterarm - Werte unveraendert von der RCU, nur auf big-endian gedreht
+// ---------------------------------------------------------------------------
+
+static void putU16(uint8_t* p, uint16_t v) {
+    p[0] = static_cast<uint8_t>(v >> 8);
+    p[1] = static_cast<uint8_t>(v & 0xFF);
+}
+
+static void putU32(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>(v >> 24);
+    p[1] = static_cast<uint8_t>(v >> 16);
+    p[2] = static_cast<uint8_t>(v >> 8);
+    p[3] = static_cast<uint8_t>(v & 0xFF);
+}
+
+void TelemetryDownlink::sendArmJoint(uint8_t node, const ArmJoint& joint) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [node state angle_urad(int32 BE) 0 0]
+    data[0] = node;
+    data[1] = joint.state;
+    putU32(&data[2], static_cast<uint32_t>(joint.angle_urad));
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::ARM),
+              static_cast<uint8_t>(DownlinkArmMsg::JOINT),
+              0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendArmVoltage(uint8_t node, const ArmJoint& joint) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [node 0 bus_mv(uint16 BE) stepper_mv(uint16 BE) 0 0]
+    data[0] = node;
+    putU16(&data[2], joint.bus_mv);
+    putU16(&data[4], joint.stepper_mv);
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::ARM),
+              static_cast<uint8_t>(DownlinkArmMsg::VOLTAGE),
+              0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendArmTemp(uint8_t node, const ArmJoint& joint) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [node 0 mcu(int16 BE) imu(int16 BE) 0 0]
+    data[0] = node;
+    putU16(&data[2], static_cast<uint16_t>(joint.mcu_temp));
+    putU16(&data[4], static_cast<uint16_t>(joint.imu_temp));
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::ARM),
+              static_cast<uint8_t>(DownlinkArmMsg::TEMP),
+              0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendArmRcuImu(const ArmRcuImu& imu) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+
+    // DATA: [x y z (int16 BE) 0 0] - je ein Frame fuer Accel und Gyro
+    memset(data, 0, sizeof(data));
+    for (uint8_t i = 0; i < 3; i++) putU16(&data[2 * i], static_cast<uint16_t>(imu.acc[i]));
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::ARM),
+              static_cast<uint8_t>(DownlinkArmMsg::RCU_ACCEL),
+              0, data, 0, 0);
+
+    memset(data, 0, sizeof(data));
+    for (uint8_t i = 0; i < 3; i++) putU16(&data[2 * i], static_cast<uint16_t>(imu.gyro[i]));
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::ARM),
+              static_cast<uint8_t>(DownlinkArmMsg::RCU_GYRO),
+              0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendArmLink(const ArmLink& link, uint32_t now_ms) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [frames_ok(uint16 BE) frames_bad(uint16 BE) last_msg last_node
+    //        silence(uint8, 0,1 s, gesaettigt) freefall_count]
+    // silence = Zeit seit dem letzten gueltigen Frame; 255 heisst ">= 25,5 s"
+    // oder "noch nie eins empfangen" (dann steht frames_ok auf 0).
+    putU16(&data[0], link.framesOk());
+    putU16(&data[2], link.framesBad());
+    data[4] = link.lastMsg();
+    data[5] = link.lastNode();
+    const uint32_t silence = link.framesOk() ? (now_ms - link.lastFrameMs()) / 100 : 0xFF;
+    data[6] = silence > 0xFF ? 0xFF : static_cast<uint8_t>(silence);
+    data[7] = link.freefallCount();
+
+    const uint8_t status2 = link.linkAlive(now_ms) ? DL_ARM_LINK_ALIVE : 0;
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::ARM_LINK),
+              0, data, 0, status2);
+}
+
 void TelemetryDownlink::sendUplinkStats(uint32_t rx_bytes, uint16_t frames_ok,
                                        uint16_t frames_bad, uint8_t last_opcode) {
     uint8_t data[DOWNLINK_DATA_SIZE];

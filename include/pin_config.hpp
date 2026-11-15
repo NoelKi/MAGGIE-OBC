@@ -63,9 +63,8 @@ static constexpr uint8_t PIN_M1_B = 18;        ///< Motor 1 Channel B (rueckwaer
 // jeder Digitalpin interruptfaehig, die Encoder-Bibliothek arbeitet hier
 // normal.
 //
-// Die frueher benutzten Pins 0/1 sind die ARM-UART (Serial1) und waren nur
-// deshalb frei, weil der Roboterarm in dieser Firmware nirgends instanziiert
-// wird. Mit 5/6 entfaellt diese Kollision.
+// Die frueher benutzten Pins 0/1 sind die ARM-UART (Serial1, PIN_ARM_RX/TX
+// unten). Mit 5/6 entfaellt diese Kollision.
 static constexpr uint8_t PIN_M1_ENC_A = 5;     ///< Motor 1 Encoder Channel A (ENC_HDRM1A)
 static constexpr uint8_t PIN_M1_ENC_B = 6;     ///< Motor 1 Encoder Channel B (ENC_HDRM1B)
 
@@ -182,3 +181,12 @@ static constexpr bool REXUS_ACTIVE_HIGH = false;
 // eine UART irrelevant, aber sie taugen deshalb nicht als Motorkanal.
 static constexpr uint8_t PIN_UPDOWNLINK_MINUS = 17;  ///< updownlink- (Serial4 TX)
 static constexpr uint8_t PIN_UPDOWNLINK_PLUS = 16;   ///< updownlink+ (Serial4 RX)
+
+// ===========================================================================
+// Roboterarm (Serial1, UART zur RCU des Arms, siehe arm_hal.hpp)
+// ===========================================================================
+// Belegungstabelle: 0 = RX_Power (Telemetrie vom Arm), 1 = TX_Power (Befehle
+// an den Arm). Das ist auf der Teensy 4.1 Serial1 (0 = RX1, 1 = TX1). Wer den
+// Port wechselt, muss die Serial1-Instanz in src/system.cpp mitziehen.
+static constexpr uint8_t PIN_ARM_RX = 0;   ///< Serial1 RX - Telemetrie vom Arm
+static constexpr uint8_t PIN_ARM_TX = 1;   ///< Serial1 TX - Befehle an den Arm

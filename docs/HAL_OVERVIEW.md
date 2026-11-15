@@ -32,8 +32,12 @@ machine, and drives the outputs.
 | `UplinkReceiver` | Serial4 RX | 16 | 6-byte telecommand frame, CRC-8 |
 | `TelemetryDownlink` | Serial4 TX, 38400 baud | 17 | 20-byte frame, CRC-8, no ACK |
 | `REXUSHAL` | L0, SOE, SODS (open drain, active low) | 40, 39, 38 | Debounced, sent down as raw levels only. They trigger no transitions in this build |
+| `ArmLink` | Robot arm control unit (RCU, STM32), Serial1 | RX 0, TX 1 | LISA-ODISEE ICD v0.9 frames, CRC-32/MPEG-2. Baud rate `rates::ARM_BAUDRATE` (115200, **unconfirmed**) |
 
 Up- and downlink share one UART (`Serial4`) to the REXUS service module (RXSM).
+The robot arm has its own UART (`Serial1`). `extern/lisa-if/` is the Python
+reference parser for that protocol (a copy, see `extern/README.md`); it is not
+part of the build.
 USB `Serial` (115200) is for log output only.
 
 ## Main loop and data rates
@@ -49,6 +53,10 @@ live in `include/data_rates.hpp`.
 | 10 ms (100 Hz) | IMU accel + gyro (BMI088 runs at 400 Hz internally) | `01/01`, `01/02` |
 | 50 ms (20 Hz) | motor 1 + 2 position, PWM, flags | `02/01`, `02/02` |
 | 1 s | state, subsystem bits, uptime, REXUS levels, uplink statistics | `03/01`–`03/03` |
+| 200 ms (5 Hz) | arm: joint state + angle, only joints with a new value | `05/01` |
+| 200 ms (5 Hz) | arm: RCU IMU accel + gyro, throttled from ~104 Hz | `05/04`, `05/05` |
+| 1 s | arm: voltage and temperature per joint, only new values | `05/02`, `05/03` |
+| 1 s | arm link statistics (priority lane, like all SYS frames) | `03/04` |
 | on change | state or SODS/LO/SOE, ms-exact, **SD card only** | `10/01` |
 | every loop | SD card: at most one write, never while a motor runs | – |
 
@@ -122,6 +130,15 @@ releases the DESCENT lock.
 | `0x1F` | ABORT | PRE_LAUNCH, TEST, ARMED |
 | `0x12` | STATE_RESET | any |
 | `0x20` | FORCE_TARE (arg 0 = both, 1, 2) | ground states, ARMED |
+| `0x30 0x31` | ARM_STOP, ARM_INHIBIT (arg high byte = joint, 0 = all) | ground states, ARMED |
+| `0x35` | ARM_BLINK (joint) | ground states |
+| `0x32 0x33 0x34` | ARM_RELEASE, ARM_JOG (±1..30°), ARM_SET_VELOCITY (°/s) | TEST |
+
+Arm commands carry the joint (node ID 1..8) in the high byte of the argument
+and the value in the low byte. On every transition that stops the motors
+(leaving TEST, ABORT, flight start, return to PRE_LAUNCH) the OBC also sends
+STOP and INHIBIT to all joints. The flight sequence in `ROBOT_ARM` is still a
+placeholder.
 | `0x00`, `0x08` | MOTOR_OFF, MOTOR2_OFF | ground states, ARMED |
 | `0x01 0x05 0x06 0x07` | MOTOR_ON, ZERO, TURN, GOTO | TEST |
 | `0x09 0x0A 0x0B 0x0C` | MOTOR2_ON, ZERO, TURN, GOTO | TEST |

@@ -6,6 +6,7 @@
 #include "hal/force_hal.hpp"
 #include "hal/uplink_hal.hpp"
 #include "hal/rexus_hal.hpp"
+#include "hal/arm_hal.hpp"
 #include "statemachine/state_machine.hpp"
 #include "storage/persistent_state.hpp"
 #include "storage/sd_logger.hpp"
@@ -26,8 +27,10 @@
  *   Kraftsensor 2       - 4x HX711 (A/B/C/D), Verrechnung erst am Boden
  *   Down-/Uplink        - Serial4 (Pin 16/17) zum REXUS-Servicemodul
  *   REXUS-Signale       - werden eingelesen und als Rohpegel heruntergefunkt
+ *   Roboterarm (RCU)    - Serial1 (Pin 0/1), Telemetrie durchgereicht,
+ *                         Einzelgelenk-Jog per Telecommand nur in TEST
  *
- * Weitere Komponenten (Kameras, Temperatur, Roboterarm) kommen Stueck fuer
+ * Weitere Komponenten (Kameras, Temperatur) kommen Stueck fuer
  * Stueck dazu, sobald sie am Aufbau haengen und getestet werden.
  */
 
@@ -65,6 +68,7 @@ private:
     ForceHAL* force2_ = nullptr;                        ///< Kraftsensor 2 (4x HX711, gemeinsamer Takt)
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
+    ArmLink* arm_ = nullptr;                            ///< UART zur RCU des Roboterarms (Serial1)
     PersistentState persist_;                           ///< Zustand + Boot-Zaehler (EEPROM)
     SdLogger sd_;                                       ///< Bordspeicher (SD-Karte)
 
@@ -92,6 +96,18 @@ private:
     uint32_t last_motor_telemetry_ms_ = 0;  ///< Zeitstempel der letzten Motor-Frames
     uint8_t  last_event_signals_ = 0;       ///< REXUS-Signale beim letzten Ereignis-Frame
     uint32_t last_sys_telemetry_ms_ = 0;    ///< Zeitstempel des letzten SYS/STATE-Downlinks
+    uint32_t last_arm_joint_ms_ = 0;        ///< Zeitstempel der letzten ARM/JOINT-Runde
+    uint32_t last_arm_imu_ms_ = 0;          ///< Zeitstempel der letzten RCU-IMU-Frames
+    uint32_t last_arm_power_ms_ = 0;        ///< Zeitstempel der letzten Spannungs-/Temperatur-Runde
+
+    // -----------------------------------------------------------------------
+    // Roboterarm
+    // -----------------------------------------------------------------------
+    /// Groesster Jog-Schritt pro Telecommand. Am Boden traegt ein Gelenk den
+    /// Arm nicht - getestet wird nur ein einzelnes Gelenk in kleinen
+    /// Schritten. Ein Tippfehler im Winkel soll das Gelenk nicht in den
+    /// Anschlag fahren. Gegenstueck: ARM_JOG_MAX_DEG im Server.
+    static constexpr int8_t ARM_JOG_MAX_DEG = 30;
 
     // -----------------------------------------------------------------------
     // Laufzeitbegrenzung des Motors
@@ -110,6 +126,7 @@ private:
     bool downlink_ready_ = false;           ///< Downlink-UART bereit
     bool motor_ready_ = false;              ///< Motor (inkl. Encoder) initialisiert
     bool rexus_ready_ = false;              ///< REXUS-Signalpins konfiguriert
+    bool arm_ready_ = false;                ///< Arm-UART offen (ob die RCU antwortet: arm_->linkAlive())
     bool force1_ready_ = false;             ///< Kraftsensor 1 initialisiert
     bool force2_ready_ = false;             ///< Kraftsensor 2 initialisiert
     bool motor2_ready_ = false;             ///< Motor 2 (inkl. Encoder) initialisiert
@@ -189,6 +206,14 @@ private:
     void updateCheckpoint(uint32_t now_ms);
     void handleUplink(uint32_t now_ms);
     bool handleMotorCommand(const UplinkCommand& cmd);
+
+    /// Arm-Telemetrie in den Downlink (Raten: data_rates.hpp, ARM_*).
+    void handleArmTelemetry(uint32_t now_ms);
+    /// Arm-Telecommand (0x3x) ausfuehren. false = kein Arm-Opcode.
+    /// Die Zustandspruefung (TEST-Sperre) macht der Aufrufer.
+    bool handleArmCommand(const UplinkCommand& cmd);
+    /// Gelenke anhalten und sperren - bei denselben Zustandswechseln wie die Motoren.
+    void stopArm();
 
     /// Gemeinsame Kommandologik fuer Motor 1 und Motor 2 (siehe MotorAction).
     /// Motor-agnostisch: welcher Wire-Opcode auf welche Aktion/welchen Motor

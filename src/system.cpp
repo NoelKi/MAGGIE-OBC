@@ -16,6 +16,17 @@
 static uint8_t serial4_tx_extra[512];
 static uint8_t serial4_rx_extra[256];
 
+// Serial1-Puffer fuer den Roboterarm. Empfang: Eine SD-Schreiboperation haelt
+// den Loop bis zu 250 ms an - bei 115200 Baud sind das bis zu ~2,9 KB, die die
+// RCU in der Zeit schicken koennte. 1 KB reicht fuer die ~3 KB/s, die sie
+// realistisch sendet (RCU-IMU mit 104 Hz plus Gelenke). Senden: STOP/INHIBIT
+// "an alle" sind 8 Frames a 8 Byte auf einmal.
+static uint8_t serial1_rx_extra[1024];
+static uint8_t serial1_tx_extra[256];
+
+// 1 Grad in Mikroradiant (pi / 180 * 1e6) - die RCU rechnet in urad.
+static constexpr float URAD_PER_DEG = 17453.2925f;
+
 System::System() {
     // Konstruktor
 }
@@ -29,6 +40,7 @@ System::~System() {
     delete force2_;
     delete uplink_;
     delete rexus_;
+    delete arm_;
 }
 
 bool System::init(bool after_watchdog_reset) {
@@ -137,6 +149,19 @@ bool System::init(bool after_watchdog_reset) {
     uplink_ = new UplinkReceiver(Serial4);
 
     // -----------------------------------------------------------------------
+    // Roboterarm (RCU an Serial1, Pin 0 RX / 1 TX). init() oeffnet nur die
+    // UART - ob die RCU antwortet, steht in SYS/ARM_LINK. Kein Gelenk wird
+    // hier freigegeben: Nach dem Einschalten stehen die Module in INHIBITED
+    // (ICD 3.2), freigeben geht nur per ARM_RELEASE in TEST.
+    // -----------------------------------------------------------------------
+    Serial.printf("INFO  [System]: Initialisiere Roboterarm-UART (Serial1, Pin %u/%u, %lu Baud)...\n",
+                  PIN_ARM_RX, PIN_ARM_TX, static_cast<unsigned long>(rates::ARM_BAUDRATE));
+    arm_ = new ArmLink(Serial1);
+    arm_ready_ = arm_->init(rates::ARM_BAUDRATE);
+    Serial1.addMemoryForRead(serial1_rx_extra, sizeof(serial1_rx_extra));
+    Serial1.addMemoryForWrite(serial1_tx_extra, sizeof(serial1_tx_extra));
+
+    // -----------------------------------------------------------------------
     // REXUS-Signale (L0 / SOE / SODS). Sie loesen in diesem Ausbau KEINE
     // Zustandswechsel aus - die Rohpegel gehen nur mit dem SYS/STATE-Frame an
     // die Bodenstation, damit die Verkabelung am Aufbau geprueft werden kann.
@@ -205,6 +230,10 @@ void System::run() {
     // Eingehende Telecommands verarbeiten (jeden Loop, geringe Latenz)
     handleUplink(now);
 
+    // Telemetrie der Arm-RCU einlesen (jeden Loop, damit der UART-Puffer
+    // auch nach einer langen SD-Schreiboperation nicht ueberlaeuft)
+    if (arm_) arm_->poll();
+
     // Zustand fortschreiben (Telecommands, REXUS-Signale, Flugzeit) und die
     // Aktionen des Flugablaufs ausfuehren
     handleStateMachine(now);
@@ -237,6 +266,9 @@ void System::run() {
         last_sys_telemetry_ms_ = now;
         handleSystemTelemetry(now);
     }
+
+    // Roboterarm (eigene, niedrige Raten - siehe data_rates.hpp)
+    handleArmTelemetry(now);
 
     // Flugzeit sichern, dann Bordspeicher: beides nie bei laufendem Motor.
     updateCheckpoint(now);
@@ -401,6 +433,128 @@ void System::handleSystemTelemetry(uint32_t now_ms) {
                                    uplink_->framesBad(), uplink_->lastOpcode());
         downlink_->sendUplinkRaw(uplink_->burstBytes(), uplink_->burstLen());
     }
+
+    // Arm-Link-Statistik: zeigt am Boden, ob die RCU ueberhaupt antwortet.
+    if (arm_ && arm_ready_) downlink_->sendArmLink(*arm_, now_ms);
+}
+
+// ---------------------------------------------------------------------------
+// Roboterarm
+// ---------------------------------------------------------------------------
+
+void System::handleArmTelemetry(uint32_t now_ms) {
+    if (!downlink_ready_ || !downlink_ || !arm_ || !arm_ready_) return;
+
+    // Nur Gelenke mit NEUEM Wert senden: Antwortet die RCU nicht, faellt die
+    // Kurve am Boden ab, statt mit dem letzten Wert scheinbar weiterzulaufen.
+    if (now_ms - last_arm_joint_ms_ >= rates::ARM_JOINT_INTERVAL_MS) {
+        last_arm_joint_ms_ = now_ms;
+        for (uint8_t node = 1; node <= ARM_MAX_JOINTS; node++) {
+            ArmJoint* j = arm_->joint(node);
+            if (!j->state_new) continue;
+            j->state_new = false;
+            downlink_->sendArmJoint(node, *j);
+        }
+    }
+
+    if (now_ms - last_arm_imu_ms_ >= rates::ARM_IMU_INTERVAL_MS) {
+        last_arm_imu_ms_ = now_ms;
+        ArmRcuImu& imu = arm_->rcuImu();
+        if (imu.fresh) {
+            imu.fresh = false;
+            downlink_->sendArmRcuImu(imu);
+        }
+    }
+
+    if (now_ms - last_arm_power_ms_ >= rates::ARM_POWER_INTERVAL_MS) {
+        last_arm_power_ms_ = now_ms;
+        for (uint8_t node = 1; node <= ARM_MAX_JOINTS; node++) {
+            ArmJoint* j = arm_->joint(node);
+            if (j->voltage_new) {
+                j->voltage_new = false;
+                downlink_->sendArmVoltage(node, *j);
+            }
+            if (j->temp_new) {
+                j->temp_new = false;
+                downlink_->sendArmTemp(node, *j);
+            }
+        }
+    }
+}
+
+void System::stopArm() {
+    if (!arm_ || !arm_ready_) return;
+    arm_->stopAll();
+    arm_->inhibitAll();
+}
+
+/// Gelenk aus dem ARG eines Arm-Kommandos (High-Byte). 0 = alle.
+static uint8_t armNode(const UplinkCommand& cmd) {
+    return static_cast<uint8_t>(static_cast<uint16_t>(cmd.arg) >> 8);
+}
+
+/// Wert aus dem ARG eines Arm-Kommandos (Low-Byte).
+static uint8_t armValue(const UplinkCommand& cmd) {
+    return static_cast<uint8_t>(cmd.arg & 0xFF);
+}
+
+bool System::handleArmCommand(const UplinkCommand& cmd) {
+    const UplinkOpcode op = static_cast<UplinkOpcode>(cmd.opcode);
+    if (op != UplinkOpcode::ARM_RELEASE && op != UplinkOpcode::ARM_JOG &&
+        op != UplinkOpcode::ARM_SET_VELOCITY) {
+        return false;
+    }
+    if (!arm_ || !arm_ready_) {
+        Serial.println("WARN  [System]: Arm-Telecommand ignoriert - Arm-UART nicht bereit.");
+        return true;
+    }
+
+    // Freigeben und Fahren nur fuer EIN bestimmtes Gelenk, nie "alle".
+    const uint8_t node = armNode(cmd);
+    if (node < 1 || node > ARM_MAX_JOINTS) {
+        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X mit ungueltigem Gelenk %u "
+                      "(1..%u) - ignoriert.\n", cmd.opcode, node, ARM_MAX_JOINTS);
+        return true;
+    }
+
+    switch (op) {
+        case UplinkOpcode::ARM_RELEASE:
+            Serial.printf("INFO  [System]: TC ARM_RELEASE Gelenk %u\n", node);
+            arm_->sendCommand(node, ArmMsg::RELEASE);
+            return true;
+
+        case UplinkOpcode::ARM_JOG: {
+            const int8_t deg = static_cast<int8_t>(armValue(cmd));
+            if (deg == 0 || deg > ARM_JOG_MAX_DEG || deg < -ARM_JOG_MAX_DEG) {
+                Serial.printf("WARN  [System]: ARM_JOG Gelenk %u mit %d Grad ausserhalb "
+                              "+-1..%d - ignoriert.\n", node, deg, ARM_JOG_MAX_DEG);
+                return true;
+            }
+            const int32_t urad = static_cast<int32_t>(lroundf(deg * URAD_PER_DEG));
+            Serial.printf("INFO  [System]: TC ARM_JOG Gelenk %u um %d Grad (%ld urad)\n",
+                          node, deg, static_cast<long>(urad));
+            arm_->sendMoveRel(node, urad);
+            return true;
+        }
+
+        case UplinkOpcode::ARM_SET_VELOCITY: {
+            const uint8_t deg_s = armValue(cmd);
+            if (deg_s == 0) {
+                Serial.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit 0 Grad/s - ignoriert.\n",
+                              node);
+                return true;
+            }
+            // Beschleunigung = Geschwindigkeit pro Sekunde: in 1 s auf Endtempo.
+            const uint32_t urad_s = static_cast<uint32_t>(lroundf(deg_s * URAD_PER_DEG));
+            Serial.printf("INFO  [System]: TC ARM_SET_VELOCITY Gelenk %u auf %u Grad/s\n",
+                          node, deg_s);
+            arm_->sendSetVelocity(node, urad_s, urad_s);
+            return true;
+        }
+
+        default:
+            return false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +655,7 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
         current == MissionState::PRE_LAUNCH || flight_begins) {
         if (motor_  && motor_ready_)  motor_->off();
         if (motor2_ && motor2_ready_) motor2_->off();
+        stopArm();
         Serial.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
                       StateMachine::toString(current));
     }
@@ -641,8 +796,9 @@ void System::robotArmStep(uint32_t t_ms) {
     //      * Checkpoint-Writes (Flash) sperren kurz die Interrupts - Bytes VOM
     //        Arm koennen dabei verloren gehen. Antworten deshalb mit Start-
     //        Marker + CRC rahmen (wie der Uplink, der sich selbst resynct).
-    //  - Arm-Positionen nur auf die SD-Karte loggen (eigene MSGID im selben
-    //    20-Byte-Format), der Downlink bleibt unveraendert.
+    //  - Die Arm-Telemetrie (Gelenkwinkel, RCU-IMU, Link) geht bereits per
+    //    handleArmTelemetry() in Downlink und SD-Karte. Befehle an den Arm:
+    //    arm_->sendMoveRel() / sendCommand() (arm_hal.hpp).
     (void)t_ms;
 }
 
@@ -679,6 +835,7 @@ bool System::commandAllowed(UplinkOpcode op) const {
         case MissionState::ARMED:
             return op == UplinkOpcode::ABORT ||
                    op == UplinkOpcode::MOTOR_OFF || op == UplinkOpcode::MOTOR2_OFF ||
+                   op == UplinkOpcode::ARM_STOP || op == UplinkOpcode::ARM_INHIBIT ||
                    op == UplinkOpcode::FORCE_TARE;
 
         // Boden: alles; Motorfahrten prueft handleUplink() weiter auf TEST.
@@ -759,6 +916,33 @@ void System::handleUplink(uint32_t now_ms) {
                 execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::OFF, 0, motor2_on_since_ms_);
                 continue;
 
+            case UplinkOpcode::ARM_STOP:
+            case UplinkOpcode::ARM_INHIBIT: {
+                // Anhalten und Sperren sind SICHERHEITSkommandos wie MOTOR_OFF:
+                // ausserhalb der TEST-Sperre. Gelenk 0 = alle.
+                const bool stop = op == UplinkOpcode::ARM_STOP;
+                const uint8_t node = armNode(cmd);
+                Serial.printf("INFO  [System]: TC %s Gelenk %u%s\n",
+                              stop ? "ARM_STOP" : "ARM_INHIBIT", node, node == 0 ? " (alle)" : "");
+                if (!arm_ || !arm_ready_) continue;
+                if (node == 0) {
+                    if (stop) arm_->stopAll(); else arm_->inhibitAll();
+                } else if (node <= ARM_MAX_JOINTS) {
+                    arm_->sendCommand(node, stop ? ArmMsg::STOP : ArmMsg::INHIBIT);
+                }
+                continue;
+            }
+
+            case UplinkOpcode::ARM_BLINK: {
+                // Bewegt nichts - zur Zuordnung Node-ID <-> Gelenk am Aufbau.
+                const uint8_t node = armNode(cmd);
+                Serial.printf("INFO  [System]: TC ARM_BLINK Gelenk %u\n", node);
+                if (arm_ && arm_ready_ && node >= 1 && node <= ARM_MAX_JOINTS) {
+                    arm_->sendCommand(node, ArmMsg::BLINK);
+                }
+                continue;
+            }
+
             default:
                 break;
         }
@@ -771,7 +955,7 @@ void System::handleUplink(uint32_t now_ms) {
             continue;
         }
 
-        if (!handleMotorCommand(cmd)) {
+        if (!handleMotorCommand(cmd) && !handleArmCommand(cmd)) {
             Serial.printf("WARN  [System]: Unbekanntes Telecommand 0x%02X ignoriert.\n",
                           cmd.opcode);
         }

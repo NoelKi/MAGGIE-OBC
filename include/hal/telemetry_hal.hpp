@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "hal/imu_hal.hpp"
 #include "hal/force_hal.hpp"
+#include "hal/arm_hal.hpp"
 
 /**
  * @file telemetry_hal.hpp
@@ -41,6 +42,16 @@
  *   FORCE/TARGET2: [c0 c1 c2 c3]     (4x int16: A, B, C, D)
  *                  je int16 = TARIERTE HX711-Counts / FORCE_TELE_DIV
  *                  Flags beider Typen in STATUS2 (siehe DL_FORCE_*)
+ *   ARM/JOINT:     [node state angle_urad(int32 BE) 0 0]
+ *   ARM/VOLTAGE:   [node 0 bus_mv(uint16 BE) stepper_mv(uint16 BE) 0 0]
+ *   ARM/TEMP:      [node 0 mcu(int16 BE) imu(int16 BE) 0 0]   (Rohwerte der RCU)
+ *   ARM/RCU_ACCEL: [ax ay az 0 0]   (3x int16, +-4 g / 32768)
+ *   ARM/RCU_GYRO : [gx gy gz 0 0]   (3x int16, +-500 dps / 32768)
+ *   SYS/ARM_LINK:  [frames_ok(uint16 BE) frames_bad(uint16 BE) last_msg
+ *                   last_node silence(uint8, 0,1 s) freefall_count]
+ *                  STATUS2 = DL_ARM_LINK_*
+ *   Die Arm-Werte reicht der OBC unveraendert von der RCU durch (siehe
+ *   arm_hal.hpp), nur die Byte-Reihenfolge wird auf big-endian gedreht.
  *
  * The int16 values are the native BMI088 counts. The ground station applies
  * the documented scale factors:
@@ -124,6 +135,7 @@ enum class DownlinkSubsystem : uint8_t {
     MOTOR = 0x02,
     SYS   = 0x03,
     FORCE = 0x04,
+    ARM   = 0x05,   ///< Roboterarm, durchgereicht von der RCU (arm_hal.hpp)
     EVENT = 0x10,   ///< NUR SD-Karte - geht nie ueber die UART (siehe logEvent)
 };
 
@@ -150,12 +162,25 @@ enum class DownlinkForceMsg : uint8_t {
     TARGET2 = 0x02,   ///< 4 Zellen A/B/C/D (Eigenbau, 3x 120 Grad + Z)
 };
 
+// MSGID2 - message type for the ARM subsystem
+enum class DownlinkArmMsg : uint8_t {
+    JOINT     = 0x01,   ///< Zustand + Winkel eines Gelenks
+    VOLTAGE   = 0x02,   ///< Bus- und Stepper-Spannung eines Gelenks
+    TEMP      = 0x03,   ///< MCU- und IMU-Temperatur eines Gelenks
+    RCU_ACCEL = 0x04,   ///< RCU-IMU Beschleunigung
+    RCU_GYRO  = 0x05,   ///< RCU-IMU Drehrate
+};
+
 // MSGID2 - message type for the SYS subsystem
 enum class DownlinkSysMsg : uint8_t {
     STATE      = 0x01,
     UPLINK     = 0x02,   ///< Empfangsstatistik des Telecommand-Uplinks
     UPLINK_RAW = 0x03,   ///< Rohe Kopfbytes des zuletzt empfangenen Uplink-Bursts
+    ARM_LINK   = 0x04,   ///< Empfangsstatistik der Arm-UART (SYS = Vorrangspur)
 };
+
+// SYS/ARM_LINK - flags, uebertragen in STATUS2
+static constexpr uint8_t DL_ARM_LINK_ALIVE = 0x01;  ///< bit0: gueltiges Frame juenger als ARM_LINK_TIMEOUT_MS
 
 // STATUS1 bit definitions
 static constexpr uint8_t DL_STATUS1_SYSTEM_HEALTHY = 0x01;  ///< bit0: system healthy
@@ -293,6 +318,24 @@ public:
      * @param len   tatsaechlich gefuellte Anzahl (geht als STATUS2 mit)
      */
     void sendUplinkRaw(const uint8_t* bytes, uint8_t len);
+
+    /// ARM/JOINT - Zustand und Winkel eines Gelenks (Layout siehe Dateikopf).
+    void sendArmJoint(uint8_t node, const ArmJoint& joint);
+
+    /// ARM/VOLTAGE und ARM/TEMP eines Gelenks.
+    void sendArmVoltage(uint8_t node, const ArmJoint& joint);
+    void sendArmTemp(uint8_t node, const ArmJoint& joint);
+
+    /// ARM/RCU_ACCEL + ARM/RCU_GYRO.
+    void sendArmRcuImu(const ArmRcuImu& imu);
+
+    /**
+     * @brief SYS/ARM_LINK - Empfangsstatistik der Arm-UART.
+     *
+     * Laeuft als SYS-Frame in der Vorrangspur: Ob der Arm ueberhaupt
+     * antwortet, muss auch bei voller Leitung am Boden ankommen.
+     */
+    void sendArmLink(const ArmLink& link, uint32_t now_ms);
 
     /**
      * @brief Ereignis-Frame NUR fuer die SD-Karte (EVENT/STATE).

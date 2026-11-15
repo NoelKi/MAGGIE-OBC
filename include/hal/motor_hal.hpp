@@ -328,9 +328,18 @@ private:
     // "kein Fortschritt mehr" deshalb nicht als Fehler gewertet, sondern als
     // ERREICHTES Ziel (Kontakt/Anschlag) interpretiert - turn_failed_ bleibt
     // false, der Motor schaltet trotzdem sofort ab.
+    //
+    // SOFT_APPROACH_CRUISE_SPEED = 140 (Vorgabe 2026-11-15, vorher 255): Die
+    // Fahrt laeuft damit durchgehend mit 140 - LANGSAMER als
+    // SOFT_APPROACH_SPEED, das Abbremsen vor dem Ziel greift also nicht mehr.
+    // 140 liegt unter der lastfreien Anlaufschwelle von ~150 (siehe oben):
+    // Laeuft der Motor nicht an, versucht updateBreakaway() es dreimal und
+    // meldet dann turnFailed(). Bleibt er in der Anfahrzone stehen, gilt das
+    // als Anschlag erreicht (SOFT_APPROACH_STALL_MS) - die Fahrt endet dann
+    // vor dem Ziel, ohne Fehlermeldung. Gilt auch fuer die HDRM-Fahrten im Flug.
     static constexpr long     SOFT_APPROACH_WINDOW_COUNTS = 300;  // ~24 Grad bei 4550 Counts/U
     static constexpr uint32_t SOFT_APPROACH_STALL_MS       = 150;
-    static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 255;
+    static constexpr int16_t  SOFT_APPROACH_CRUISE_SPEED   = 140;
     static constexpr int16_t  SOFT_APPROACH_SPEED          = 170;
 
     /// Dauer des Bremsimpulses am Ende einer Fahrt. Lang genug, damit der

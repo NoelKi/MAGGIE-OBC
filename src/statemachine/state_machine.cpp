@@ -10,7 +10,6 @@ const char* StateMachine::toString(MissionState s) {
         case MissionState::EXPERIMENT: return "EXPERIMENT";
         case MissionState::ROBOT_ARM:  return "ROBOT_ARM";
         case MissionState::DESCENT:    return "DESCENT";
-        case MissionState::ABORT:      return "ABORT";
         case MissionState::TEST:       return "TEST";
     }
     return "UNKNOWN";
@@ -33,16 +32,14 @@ MissionState StateMachine::stateAfterReboot(uint8_t stored, bool valid) {
         case MissionState::DESCENT:
             return static_cast<MissionState>(stored);
 
-        // Ein Abbruch bleibt ein Abbruch - ein Reset darf ihn nicht aufheben.
-        case MissionState::ABORT:      return MissionState::ABORT;
-
         // TEST ist ein reiner Bodenmodus: Nach einem Neustart sind die Aktoren
         // wieder gesperrt, bis erneut TEST_ENTER kommt.
         case MissionState::TEST:       return MissionState::PRE_LAUNCH;
 
         case MissionState::PRE_LAUNCH: return MissionState::PRE_LAUNCH;
     }
-    // Unbekannter Wert (z.B. aus einem anderen Firmware-Stand) -> sicherer Grundzustand.
+    // Unbekannter Wert (z.B. 5 = altes ABORT oder ein anderer Firmware-Stand)
+    // -> sicherer Grundzustand.
     return MissionState::PRE_LAUNCH;
 }
 
@@ -69,7 +66,7 @@ void StateMachine::update(uint32_t now_ms, const StateMachineInputs& in) {
             transitionTo(MissionState::EXPERIMENT, now_ms);
         } else if (in.lo) {
             transitionTo(MissionState::ASCENT, now_ms);
-        } else if (in.sods && state_ != MissionState::ABORT) {
+        } else if (in.sods) {
             transitionTo(MissionState::ARMED, now_ms);   // auch aus TEST
         }
         return;
@@ -115,17 +112,6 @@ bool StateMachine::enterTest(uint32_t now_ms) {
 bool StateMachine::exitTest(uint32_t now_ms) {
     if (state_ != MissionState::TEST) return false;
     transitionTo(MissionState::PRE_LAUNCH, now_ms);
-    return true;
-}
-
-bool StateMachine::abort(uint32_t now_ms) {
-    if (state_ != MissionState::PRE_LAUNCH && state_ != MissionState::TEST &&
-        state_ != MissionState::ARMED) {
-        Serial.printf("WARN  [StateMachine]: ABORT abgelehnt - Zustand ist %s.\n",
-                      toString(state_));
-        return false;
-    }
-    transitionTo(MissionState::ABORT, now_ms);
     return true;
 }
 

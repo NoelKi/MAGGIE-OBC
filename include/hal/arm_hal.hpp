@@ -157,6 +157,10 @@ public:
     /// urad-Werte fuhren es. Standard der RCU: 6 Grad/s, 2 Grad/s^2.
     bool sendSetVelocity(uint8_t node, float speed_deg_s, float accel_deg_s2);
 
+    /// Freie Bytes im TX-Puffer - zum Pruefen, ob mehrere Frames zusammen
+    /// passen (ArmFlightPlayer sendet alle Gelenke oder keins).
+    int txFree() const;
+
     /// STOP bzw. INHIBIT an alle Gelenke 1..ARM_MAX_JOINTS.
     void stopAll();
     void inhibitAll();

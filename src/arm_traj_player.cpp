@@ -161,7 +161,13 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
         // Ausnahme: in FINISH schon am Startwinkel - ein stehendes Gelenk
         // meldet sich womoeglich nicht mehr, waehrend das andere noch faehrt.
         const bool parked = phase_ == Phase::FINISH && fabsf(actual[k]) <= DONE_TOL_DEG;
-        if (phase_ != Phase::SETTLE && !parked && now_ms - j->state_ms > STATE_TIMEOUT_MS) {
+        // Vorzeichenbehaftet vergleichen: now_ms ist der Loop-Anfang, poll()
+        // stempelt state_ms aber erst danach mit millis(). Ein Frame aus
+        // demselben Loop ist dann "juenger als jetzt" - unsigned waere die
+        // Differenz ~4e9 und loeste faelschlich NO_STATE aus (17.11.2026:
+        // zwei Abbrueche, obwohl die RCU lueckenlos alle 200 ms meldete).
+        if (phase_ != Phase::SETTLE && !parked &&
+            static_cast<int32_t>(now_ms - j->state_ms) > static_cast<int32_t>(STATE_TIMEOUT_MS)) {
             abort(arm, "keine JOINT_STATE mehr von der RCU", joints_[k].node, Result::NO_STATE);
             return;
         }

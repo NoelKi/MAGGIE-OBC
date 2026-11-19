@@ -47,8 +47,8 @@ static constexpr uint8_t PIN_CS_GYRO = 36;     ///< Chip Select Gyroscope (CS_GY
 // Kanal A ist die Vorwaertsrichtung: setSpeed(+x) legt die PWM auf A, B bleibt
 // LOW. Dreht der Motor verkehrt herum, die beiden Zeilen tauschen.
 //
-// Pin 19 ist laut Tabelle CAMDIR1 (Kamera-MUX, in dieser Firmware nicht
-// instanziiert) und war nur die Behelfsverdrahtung des Tischaufbaus.
+// Pin 19 ist laut Tabelle CAMDIR1 (Kamera-Mux, siehe unten) und war frueher
+// nur die Behelfsverdrahtung des Tischaufbaus.
 //
 // A/B GETAUSCHT (Bodentest 2026-08-26): Motor 1 drehte bei positivem
 // setSpeed() falsch herum - gleicher Fix wie bei Motor 2 (siehe unten):
@@ -190,3 +190,16 @@ static constexpr uint8_t PIN_UPDOWNLINK_PLUS = 16;   ///< updownlink+ (Serial4 R
 // Port wechselt, muss die Serial1-Instanz in src/system.cpp mitziehen.
 static constexpr uint8_t PIN_ARM_RX = 0;   ///< Serial1 RX - Telemetrie vom Arm
 static constexpr uint8_t PIN_ARM_TX = 1;   ///< Serial1 TX - Befehle an den Arm
+
+// ===========================================================================
+// Kameras (4x RunCam Split 4 V2 an Serial5 ueber CD4052B-Mux, camera_hal.hpp)
+// ===========================================================================
+// Belegungstabelle: 19 = CAMDIR1, 20 = CAM1_RX, 21 = CAM1_TX, 22 = CAMDIR2.
+// Die Namen CAM1_RX/TX sind aus Sicht der KAMERA: Teensy-TX5 (20) geht an
+// den RX der Kamera, der TX der Kamera an Teensy-RX5 (21). Wer den Port
+// wechselt, muss die Serial5-Instanz in src/system.cpp mitziehen.
+// CAMDIR1/2 sind die Kanalwahl A/B des Mux: Kanal = A + 2*B, Kamera = Kanal + 1.
+static constexpr uint8_t PIN_CAM_SEL_A = 19;   ///< CAMDIR1 -> Mux A
+static constexpr uint8_t PIN_CAM_SEL_B = 22;   ///< CAMDIR2 -> Mux B
+static constexpr uint8_t PIN_CAM_TX    = 20;   ///< Serial5 TX -> Cam1_Rx -> Mux Y
+static constexpr uint8_t PIN_CAM_RX    = 21;   ///< Serial5 RX <- Cam1_Tx <- Mux X

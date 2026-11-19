@@ -72,7 +72,12 @@ enum class UplinkOpcode : uint8_t {
     TEST_ENTER      = 0x10,   ///< Bodentest-Modus betreten (nur aus PRE_LAUNCH)
     TEST_EXIT       = 0x11,   ///< Bodentest-Modus verlassen -> PRE_LAUNCH
     STATE_RESET     = 0x12,   ///< zurueck nach PRE_LAUNCH, aus jedem Zustand (Testwerkzeug)
-    ABORT           = 0x1F,   ///< Abbruch: Aktoren stoppen -> ABORT
+    /// Flug-Schalter des Roboterarms. ARG 1 = an (nur in PRE_LAUNCH), 0 = aus
+    /// (in allen Bodenzustaenden und ARMED). An = die Flug-Trajektorie startet
+    /// in ROBOT_ARM sofort, aus = erst, wenn die IMU Schwerelosigkeit misst.
+    /// TEST_ENTER schaltet ihn automatisch aus. Gespeichert im EEPROM.
+    ARM_FLIGHT_ENABLE = 0x13,
+    // 0x1F = frueher ABORT (entfernt, STATE_RESET macht dasselbe) - nicht neu vergeben.
 
     /// Kraftsensor nullen (Zellen muessen frei sein).
     /// ARG: 0 = beide, 1 = Kraftsensor 1, 2 = Kraftsensor 2.
@@ -99,8 +104,14 @@ enum class UplinkOpcode : uint8_t {
     /// relativ zum aktuellen Winkel ab (+-30 Grad, Ende = Start), siehe
     /// ArmTrajPlayer. High-Byte = Gelenk fuer Spalte 1, Low-Byte = Gelenk
     /// fuer Spalte 2 (0 = nur eines). Nur TEST.
-    /// Abbruch: ARM_STOP / ARM_INHIBIT, TEST verlassen, ABORT.
+    /// Abbruch: ARM_STOP / ARM_INHIBIT, TEST verlassen.
     ARM_TRAJ_TEST    = 0x36,
+
+    /// Kamera (RunCam, camera_hal.hpp). High-Byte = Kamera 1..4 (0 = alle),
+    /// Low-Byte = CamAction: 1 START_RECORDING, 2 STOP_RECORDING, 3 Abfrage.
+    /// Bewegt nichts. PRE_LAUNCH/TEST: alles, ARMED: nur Start und Abfrage
+    /// (auf der Rampe nie eine Aufnahme stoppen).
+    CAMERA           = 0x40,
 };
 
 struct UplinkCommand {

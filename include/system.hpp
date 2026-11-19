@@ -7,7 +7,10 @@
 #include "hal/uplink_hal.hpp"
 #include "hal/rexus_hal.hpp"
 #include "hal/arm_hal.hpp"
+#include "hal/camera_hal.hpp"
 #include "arm_traj_player.hpp"
+#include "arm_flight_player.hpp"
+#include "microgravity_detector.hpp"
 #include "statemachine/state_machine.hpp"
 #include "storage/persistent_state.hpp"
 #include "storage/sd_logger.hpp"
@@ -70,7 +73,14 @@ private:
     UplinkReceiver* uplink_ = nullptr;                 ///< Telecommand-Empfang (Serial4 RX)
     REXUSHAL* rexus_ = nullptr;                         ///< REXUS-Signale L0/SOE/SODS
     ArmLink* arm_ = nullptr;                            ///< UART zur RCU des Roboterarms (Serial1)
+    CameraHAL* cam_ = nullptr;                          ///< 4 Kameras an Serial5 ueber Mux
     ArmTrajPlayer arm_traj_;                            ///< Trajektorien-Test an einem Gelenk (nur TEST)
+    ArmFlightPlayer arm_flight_{builtinFlightTable()};  ///< Flug-Trajektorie (ROBOT_ARM)
+    MicrogravityDetector ug_obc_;                       ///< Schwerelosigkeit aus der OBC-IMU
+    MicrogravityDetector ug_rcu_;                       ///< Schwerelosigkeit aus der RCU-IMU
+    uint32_t rcu_imu_seen_ms_ = 0;                      ///< updated_ms des zuletzt eingespeisten RCU-IMU-Werts
+    bool arm_flight_enabled_ = false;                   ///< Flug-Schalter (ARM_FLIGHT_ENABLE), gespiegelt im EEPROM
+    bool arm_flight_refused_logged_ = false;            ///< "Tabelle nicht ok" nur einmal melden
     PersistentState persist_;                           ///< Zustand + Boot-Zaehler (EEPROM)
     SdLogger sd_;                                       ///< Bordspeicher (SD-Karte)
 
@@ -138,6 +148,21 @@ private:
     bool force1_ready_ = false;             ///< Kraftsensor 1 initialisiert
     bool force2_ready_ = false;             ///< Kraftsensor 2 initialisiert
     bool motor2_ready_ = false;             ///< Motor 2 (inkl. Encoder) initialisiert
+    bool cam_ready_ = false;                ///< Kamera-UART offen (ob sie antworten: SYS/CAMERA)
+    uint8_t cam_info_next_ = 0;             ///< naechste Kamera fuer SYS/CAMERA_INFO
+
+    /**
+     * Kameras nehmen selbst ab dem Einschalten auf (Kamera-Einstellung).
+     * Zur Sicherheit schickt der OBC beim Eintritt in ARMED, ASCENT und
+     * EXPERIMENT sowie nach einem Neustart im Flug START_RECORDING an alle.
+     * Ein STOP geht nie automatisch raus - die Kameras laufen bis Strom aus
+     * (vom Nutzer am 17.11.2026 so festgelegt).
+     *
+     * VOR DEM FLUG AM BODEN PRUEFEN: START an eine Kamera, die schon
+     * aufnimmt, darf die Aufnahme NICHT beenden. Tut sie es doch, hier auf
+     * false setzen.
+     */
+    static constexpr bool CAM_SAFETY_START = true;
 
     // -----------------------------------------------------------------------
     // Kraftsensoren
@@ -164,7 +189,7 @@ private:
     enum class MotorAction : uint8_t { OFF, ON, ZERO, TURN, GOTO };
 
     void printWelcomeBanner();
-    void handleTelemetry();
+    void handleTelemetry(uint32_t now_ms);
 
     /// Ein MOTOR/STATE(2)-Frame fuer den angegebenen Motor senden, wenn bereit.
     void handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg msg);
@@ -208,8 +233,19 @@ private:
     uint8_t currentSignalBits() const;
     /// Sind beide Oeffnungsfahrten begonnen UND beendet?
     bool hdrmsOpenDone() const;
-    /// Platzhalter: Roboterarm-Bewegungen in ROBOT_ARM.
-    void robotArmStep(uint32_t t_ms);
+    /// Flug-Trajektorie des Arms in ROBOT_ARM (Start) und DESCENT (nur
+    /// Fortsetzen/Beenden). Freigabe: armFlightGateOpen().
+    void armFlightStep(uint32_t now_ms, MissionState state);
+    /// Flug-Schalter an ODER eine IMU misst Schwerelosigkeit.
+    bool armFlightGateOpen(uint32_t now_ms) const;
+    /// DL_ARM_FLIGHT_*-Bits fuer SYS/ARM_FLIGHT.
+    uint8_t armFlightFlags(uint32_t now_ms) const;
+    /// SYS/ARM_FLIGHT in den Downlink.
+    void sendArmFlightStatus(uint32_t now_ms);
+    void sendCameraStatus(uint32_t now_ms);
+    void cameraSafetyStart(const char* why);
+    /// Telecommand ARM_FLIGHT_ENABLE ausfuehren.
+    void setArmFlightEnable(bool enable);
     /// Flugzeit jede volle Sekunde ins EEPROM (nur bei stehenden Motoren).
     void updateCheckpoint(uint32_t now_ms);
     void handleUplink(uint32_t now_ms);

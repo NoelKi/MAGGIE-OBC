@@ -19,10 +19,21 @@ static uint8_t serial4_rx_extra[256];
 // Serial1-Puffer fuer den Roboterarm. Empfang: Eine SD-Schreiboperation haelt
 // den Loop bis zu 250 ms an - bei 115200 Baud sind das bis zu ~2,9 KB, die die
 // RCU in der Zeit schicken koennte. 1 KB reicht fuer die ~3 KB/s, die sie
-// realistisch sendet (RCU-IMU mit 104 Hz plus Gelenke). Senden: STOP/INHIBIT
-// "an alle" sind 8 Frames a 8 Byte auf einmal.
+// realistisch sendet (RCU-IMU mit 104 Hz plus Gelenke). Senden: Die
+// Flug-Trajektorie schickt alle 100 ms je Gelenk SET_VELOCITY + MOVE_ABS
+// (28 Byte), bei 8 Gelenken 224 Byte auf einmal - plus Reserve fuer einen
+// SD-Haenger, in dem der Puffer nicht leerlaeuft.
 static uint8_t serial1_rx_extra[1024];
-static uint8_t serial1_tx_extra[256];
+static uint8_t serial1_tx_extra[512];
+// Eine Zielrunde fuer ALLE Gelenke muss auf einmal passen, sonst faehrt der
+// Arm nie (ArmFlightPlayer sendet alle Gelenke oder keins). 36 = RELEASE (8)
+// + SET_VELOCITY (16) + MOVE_ABS (12) je Gelenk beim Start.
+static_assert(sizeof(serial1_tx_extra) >= ARM_MAX_JOINTS * 36,
+              "Serial1-TX-Puffer zu klein fuer eine Zielrunde aller Gelenke");
+
+// RCU-IMU (ICD 3.3.2.7): +-4 g auf int16 -> 8192 Counts pro g.
+static constexpr float RCU_IMU_COUNTS_PER_G = 8192.0f;
+static constexpr float STANDARD_G = 9.80665f;
 
 // 1 Grad in Mikroradiant (pi / 180 * 1e6) - die RCU rechnet in urad.
 static constexpr float URAD_PER_DEG = 17453.2925f;
@@ -166,6 +177,23 @@ bool System::init(bool after_watchdog_reset) {
     Serial1.addMemoryForWrite(serial1_tx_extra, sizeof(serial1_tx_extra));
 
     // -----------------------------------------------------------------------
+    // Kameras (4x RunCam an Serial5, Pin 20 TX / 21 RX, Mux-Wahl 19/22).
+    // init() oeffnet nur die UART; ob die Kameras antworten, zeigt SYS/CAMERA.
+    // -----------------------------------------------------------------------
+    Serial.printf("INFO  [System]: Initialisiere Kamera-UART (Serial5, Pin %u/%u, Mux %u/%u)...\n",
+                  PIN_CAM_TX, PIN_CAM_RX, PIN_CAM_SEL_A, PIN_CAM_SEL_B);
+    cam_ = new CameraHAL(Serial5, PIN_CAM_SEL_A, PIN_CAM_SEL_B);
+    cam_ready_ = cam_->init(rates::CAM_BAUDRATE);
+
+    // Flug-Trajektorie (im Flash eingebaut) pruefen und Flug-Schalter laden.
+    // Das Ergebnis geht mit SYS/ARM_FLIGHT an den Boden (TABLE_OK, CRC-Byte).
+    arm_flight_.verifyTable();
+    arm_flight_enabled_ = persist_.loadArmFlightEnable();
+    Serial.printf("INFO  [System]: Flug-Schalter Roboterarm: %s.\n",
+                  arm_flight_enabled_ ? "AN (Trajektorie startet in ROBOT_ARM sofort)"
+                                      : "aus (Trajektorie startet erst bei gemessener Schwerelosigkeit)");
+
+    // -----------------------------------------------------------------------
     // REXUS-Signale (L0 / SOE / SODS). Sie loesen in diesem Ausbau KEINE
     // Zustandswechsel aus - die Rohpegel gehen nur mit dem SYS/STATE-Frame an
     // die Bodenstation, damit die Verkabelung am Aufbau geprueft werden kann.
@@ -196,6 +224,7 @@ bool System::init(bool after_watchdog_reset) {
     last_state_ = start;
     persist_.saveState(static_cast<uint8_t>(start));   // z.B. TEST -> PRE_LAUNCH festhalten
     if (start == MissionState::DESCENT) planDescent(now);   // Motoren wieder blockieren
+    if (!StateMachine::isGround(start)) cameraSafetyStart("Neustart im Flug");
     logStateEvent(start, 0, now);   // Startzustand als erstes Ereignis auf die SD-Karte
 
     Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s, "
@@ -238,6 +267,19 @@ void System::run() {
     // auch nach einer langen SD-Schreiboperation nicht ueberlaeuft)
     if (arm_) arm_->poll();
 
+    // Kameras: Auftraege und reihum Abfrage, blockiert nie.
+    if (cam_ && cam_ready_) cam_->update(now);
+
+    // RCU-IMU in die Schwerelosigkeits-Erkennung (Freigabe der Flug-Trajektorie).
+    if (arm_ && arm_ready_) {
+        const ArmRcuImu& r = arm_->rcuImu();
+        if (r.updated_ms != rcu_imu_seen_ms_) {
+            rcu_imu_seen_ms_ = r.updated_ms;
+            ug_rcu_.feed(r.acc[0] / RCU_IMU_COUNTS_PER_G, r.acc[1] / RCU_IMU_COUNTS_PER_G,
+                         r.acc[2] / RCU_IMU_COUNTS_PER_G, now);
+        }
+    }
+
     // Zustand fortschreiben (Telecommands, REXUS-Signale, Flugzeit) und die
     // Aktionen des Flugablaufs ausfuehren
     handleStateMachine(now);
@@ -255,6 +297,7 @@ void System::run() {
     }
     // Phasenwechsel und Abbruch sofort melden (sonst 1 Hz mit SYS).
     if (arm_traj_.takeChanged()) sendArmTrajStatus();
+    if (arm_flight_.takeChanged()) sendArmFlightStatus(now);
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
     if (motor_)  motor_->update();
@@ -270,7 +313,7 @@ void System::run() {
     // und - falls die UART mitkommt - an den Downlink.
     if (now - last_telemetry_ms_ >= rates::IMU_INTERVAL_MS) {
         last_telemetry_ms_ = now;
-        handleTelemetry();
+        handleTelemetry(now);
     }
     if (now - last_motor_telemetry_ms_ >= rates::MOTOR_INTERVAL_MS) {
         last_motor_telemetry_ms_ = now;
@@ -307,11 +350,18 @@ bool System::motorsRunning() const {
     return (motor_ && motor_->isOn()) || (motor2_ && motor2_->isOn());
 }
 
-void System::handleTelemetry() {
-    if (!downlink_ready_ || !imu_ready_ || !imu_ || !downlink_) return;
+void System::handleTelemetry(uint32_t now_ms) {
+    if (!imu_ready_ || !imu_) return;
 
     IMUReading reading;
     if (!imu_->read(reading)) return;
+
+    // Auch ohne Downlink: Die IMU gibt die Flug-Trajektorie frei.
+    if (reading.valid) {
+        ug_obc_.feed(reading.accel_x / STANDARD_G, reading.accel_y / STANDARD_G,
+                     reading.accel_z / STANDARD_G, now_ms);
+    }
+    if (!downlink_ready_ || !downlink_) return;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -465,6 +515,42 @@ void System::handleSystemTelemetry(uint32_t now_ms) {
     // Arm-Link-Statistik: zeigt am Boden, ob die RCU ueberhaupt antwortet.
     if (arm_ && arm_ready_) downlink_->sendArmLink(*arm_, now_ms);
     sendArmTrajStatus();
+    sendArmFlightStatus(now_ms);
+    sendCameraStatus(now_ms);
+}
+
+void System::sendCameraStatus(uint32_t now_ms) {
+    if (!downlink_ready_ || !downlink_ || !cam_ || !cam_ready_) return;
+    uint8_t flags[CAM_COUNT];
+    uint8_t age[CAM_COUNT];
+    for (uint8_t c = 0; c < CAM_COUNT; ++c) {
+        const CameraStatus& s = cam_->status(c);
+        uint8_t f = 0;
+        if (cam_->alive(c, now_ms))                           f |= DL_CAM_ALIVE;
+        if (s.answered_ever)                                  f |= DL_CAM_ANSWERED;
+        if (s.features & CAM_FEATURE_START_RECORDING)         f |= DL_CAM_FEAT_START;
+        if (s.features & CAM_FEATURE_STOP_RECORDING)          f |= DL_CAM_FEAT_STOP;
+        if (s.last_cmd == CamAction::START)                   f |= DL_CAM_SENT_START;
+        if (s.last_cmd == CamAction::STOP)                    f |= DL_CAM_SENT_STOP;
+        if (s.rx_any)                                         f |= DL_CAM_RX_ANY;
+        if (s.rx_garbage)                                     f |= DL_CAM_RX_GARBAGE;
+        flags[c] = f;
+        const uint32_t a = s.answered_ever ? (now_ms - s.last_answer_ms) / 1000 : 255;
+        age[c] = a > 255 ? 255 : static_cast<uint8_t>(a);
+    }
+    downlink_->sendCamera(flags, age);
+
+    // Geraeteinfo reihum: eine Kamera pro Sekunde (Downlink ist knapp).
+    const uint8_t c = cam_info_next_;
+    cam_info_next_ = (cam_info_next_ + 1) % CAM_COUNT;
+    const CameraStatus& s = cam_->status(c);
+    downlink_->sendCameraInfo(c + 1, s.protocol, s.features, s.probes_failed);
+}
+
+void System::cameraSafetyStart(const char* why) {
+    if (!CAM_SAFETY_START || !cam_ || !cam_ready_) return;
+    Serial.printf("INFO  [System]: Kameras: START_RECORDING an alle (%s).\n", why);
+    cam_->requestAll(CamAction::START);
 }
 
 void System::sendArmTrajStatus() {
@@ -520,7 +606,8 @@ void System::handleArmTelemetry(uint32_t now_ms) {
 }
 
 void System::stopArm() {
-    arm_traj_.cancel("Arm gestoppt (TEST verlassen / ABORT)");
+    arm_traj_.cancel("Arm gestoppt (TEST verlassen / Rueckkehr nach PRE_LAUNCH)");
+    arm_flight_.cancel("Arm gestoppt (Rueckkehr an den Boden / Flugbeginn)");
     if (!arm_ || !arm_ready_) return;
     arm_->stopAll();
     arm_->inhibitAll();
@@ -727,13 +814,13 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
     // 1. Motoren - ZUERST, damit die Flash-Schreibzugriffe unten keinen
     //    laufenden Motor treffen (sie sperren die Encoder-Interrupts).
     //    Noch geplante HDRM-Fahrten verfallen (z.B. STATE_RESET mitten im
-    //    Ablauf). Stopp bei: TEST verlassen, ABORT, Flugbeginn und jeder
+    //    Ablauf). Stopp bei: TEST verlassen, Flugbeginn und jeder
     //    Rueckkehr nach PRE_LAUNCH - off() loest dabei auch die Sperre aus
     //    DESCENT, die Motoren laufen danach frei aus.
     hdrm_move_[0].pending = false;
     hdrm_move_[1].pending = false;
-    if (previous == MissionState::TEST || current == MissionState::ABORT ||
-        current == MissionState::PRE_LAUNCH || flight_begins) {
+    if (previous == MissionState::TEST || current == MissionState::PRE_LAUNCH ||
+        flight_begins) {
         if (motor_  && motor_ready_)  motor_->off();
         if (motor2_ && motor2_ready_) motor2_->off();
         stopArm();
@@ -759,7 +846,28 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
         last_checkpoint_s_ = 0;                  // neuer Zeitbezug (LO bzw. t0)
         persist_.saveCheckpoint(0);
     }
-    if (current == MissionState::DESCENT) planDescent(now_ms);
+    // Kameras: Sicherheits-Start (sie nehmen eigentlich selbst auf). Nie Stopp.
+    if (current == MissionState::ARMED || current == MissionState::ASCENT ||
+        current == MissionState::EXPERIMENT) {
+        cameraSafetyStart(StateMachine::toString(current));
+    }
+    if (current == MissionState::DESCENT) {
+        if (arm_flight_.active()) {
+            Serial.printf("WARN  [System]: DESCENT, aber die Flug-Trajektorie laeuft noch (Schritt %u) - "
+                          "sie faehrt weiter bis in die Verstaupose, die HDRMs schliessen trotzdem.\n",
+                          arm_flight_.step());
+        }
+        planDescent(now_ms);
+    }
+    // Flug-Schalter aus bei TEST und bei jeder Rueckkehr nach PRE_LAUNCH
+    // (STATE_RESET, TEST_EXIT). Er wird als letzter Schritt vor dem Flug
+    // gesetzt; nach jedem Bodendurchlauf muss er bewusst neu eingeschaltet
+    // werden - sonst bliebe er beim Umbauen des Arms (mehr Gelenke) an.
+    // Ein Neustart schaltet ihn NICHT aus (Stromzyklen auf der Rampe).
+    if ((current == MissionState::TEST || current == MissionState::PRE_LAUNCH) &&
+        arm_flight_enabled_) {
+        setArmFlightEnable(false);
+    }
 
     // 3. Zustand selbst
     persist_.saveState(static_cast<uint8_t>(current));
@@ -800,7 +908,7 @@ void System::handleFlight(uint32_t now_ms) {
                         move.degrees, *on_since[i]);
     }
 
-    if (state == MissionState::ROBOT_ARM) robotArmStep(t);
+    if (state == MissionState::ROBOT_ARM || state == MissionState::DESCENT) armFlightStep(now_ms, state);
 
     // DESCENT: jeden Motor blockieren, sobald seine Schliessfahrt vorbei ist.
     if (state == MissionState::DESCENT) {
@@ -843,44 +951,95 @@ bool System::hdrmsOpenDone() const {
     return !(motor_ && motor_->isTurning()) && !(motor2_ && motor2_->isTurning());
 }
 
-void System::robotArmStep(uint32_t t_ms) {
-    // PLATZHALTER - Roboterarm noch nicht implementiert. Wird jeden Loop in
-    // ROBOT_ARM mit der Zeit seit t0 aufgerufen; um t0 + DESCENT_AT_MS
-    // wechselt die Zustandsmaschine selbst nach DESCENT.
-    //
-    // Beim Implementieren beachten (Ergebnis der Vorbesprechung):
-    //  - Trajektorie: EINE Datei auf der SD-Karte, in Segmente (je Bewegung)
-    //    unterteilt, mit Header + CRC32. Beim Booten komplett ins RAM laden und
-    //    pruefen - im Flug die Karte nur schreiben, nie lesen (100-250 ms
-    //    Busy-Zeiten). Optional: eingebaute Standard-Trajektorie im Flash als
-    //    Rueckfallebene, falls Datei fehlt oder CRC nicht passt.
-    //  - Bewegungen sind DATEN, keine MissionStates: Segment-Index innerhalb
-    //    von ROBOT_ARM.
-    //  - Der Arm meldet seine Position: Segment erst fertig, wenn die Position
-    //    im Toleranzfenster des Endpunkts liegt; pro Segment ein Zeitlimit,
-    //    danach weiter zum naechsten. Keine Antwort = Arm ausgefallen, der
-    //    Zeitplan laeuft ohne ihn weiter.
-    //  - Neustart: Position vom Arm lesen und von dort fortsetzen; den
-    //    Segment-Index zusaetzlich an Segmentgrenzen im EEPROM sichern
-    //    (nur wenn der Arm steht - Flash sperrt Interrupts).
-    //  - Letztes Segment = Verstauen, mit Abstand VOR DESCENT_AT_MS. Die HDRMs
-    //    schliessen um t0 + 115 s - vorher pruefen, ob der Arm verstaut ist.
-    //    OFFEN: Was tun, wenn er es nicht ist? (Mechanik klaeren)
-    //  - Der Arm hat eine eigene Steuerplatine; der OBC schickt nur
-    //    Positionsbefehle per UART (max. 10 Hz). Deshalb NICHT in
-    //    motorsRunning() aufnehmen - sonst stuende der SD-Bordspeicher die
-    //    ganze Arm-Phase still. Folgen davon:
-    //      * Eine SD-Schreiboperation kann den Loop 100-250 ms anhalten - ein
-    //        Befehl kommt dann entsprechend spaeter. Die Arm-Platine muss das
-    //        abfangen (interpolieren bzw. letztes Ziel halten), nicht auf
-    //        exakte 100-ms-Schritte bauen.
-    //      * Checkpoint-Writes (Flash) sperren kurz die Interrupts - Bytes VOM
-    //        Arm koennen dabei verloren gehen. Antworten deshalb mit Start-
-    //        Marker + CRC rahmen (wie der Uplink, der sich selbst resynct).
-    //  - Die Arm-Telemetrie (Gelenkwinkel, RCU-IMU, Link) geht bereits per
-    //    handleArmTelemetry() in Downlink und SD-Karte. Befehle an den Arm:
-    //    arm_->sendMoveRel() / sendCommand() (arm_hal.hpp).
-    (void)t_ms;
+void System::armFlightStep(uint32_t now_ms, MissionState state) {
+    // Flug-Trajektorie des Roboterarms (ArmFlightPlayer, Tabelle im Flash).
+    //  - Start nur in ROBOT_ARM und nur mit Freigabe: Flug-Schalter ODER
+    //    gemessene Schwerelosigkeit (OBC- oder RCU-IMU). Bei einem Bodentest,
+    //    der die REXUS-Signale bis ROBOT_ARM durchspielt, faehrt der Arm so
+    //    nicht unter Schwerkraft los - solange der Schalter aus ist.
+    //  - Gestartet wird hoechstens einmal pro Flug (FLIGHT_ARM_STARTED im
+    //    EEPROM). Nach einem Neustart wird fortgesetzt, auch in DESCENT.
+    //  - Probleme einzelner Gelenke brechen nicht ab (siehe ArmFlightPlayer).
+    //  - Die Arm-Telemetrie (Gelenkwinkel, RCU-IMU, Link) laeuft unabhaengig
+    //    davon ueber handleArmTelemetry() in Downlink und SD-Karte.
+    if (!arm_ || !arm_ready_) return;
+    if (flight_flags_ & FLIGHT_ARM_DONE) return;
+
+    if (!arm_flight_.active() && !arm_flight_.done()) {
+        if (flight_flags_ & FLIGHT_ARM_STARTED) {
+            uint16_t saved = 0;
+            const bool valid = persist_.loadArmStep(saved);
+            if (!arm_flight_.resume(saved, valid, now_ms)) {
+                if (!arm_flight_refused_logged_) {
+                    arm_flight_refused_logged_ = true;
+                    Serial.println("WARN  [System]: Flug-Trajektorie kann nicht fortgesetzt werden "
+                                   "(Tabelle nicht ok).");
+                }
+                return;
+            }
+        } else {
+            if (state != MissionState::ROBOT_ARM) return;   // in DESCENT nie neu starten
+            if (!armFlightGateOpen(now_ms)) return;
+            if (!arm_flight_.tableOk()) {
+                if (!arm_flight_refused_logged_) {
+                    arm_flight_refused_logged_ = true;
+                    Serial.println("WARN  [System]: Flug-Trajektorie freigegeben, aber keine gueltige "
+                                   "Tabelle eingebaut - der Arm bleibt stehen.");
+                }
+                return;
+            }
+            if (!arm_flight_.start(*arm_, now_ms)) return;   // TX-Puffer voll: naechster Loop
+            Serial.printf("INFO  [System]: Flug-Trajektorie gestartet (Freigabe:%s%s%s).\n",
+                          arm_flight_enabled_ ? " Flug-Schalter" : "",
+                          ug_obc_.active(now_ms) ? " OBC-IMU" : "",
+                          ug_rcu_.active(now_ms) ? " RCU-IMU" : "");
+            flight_flags_ |= FLIGHT_ARM_STARTED;
+            persist_.saveFlightFlags(flight_flags_);
+            persist_.resetArmStep();
+        }
+    }
+
+    arm_flight_.update(*arm_, now_ms);
+
+    if (arm_flight_.done()) {
+        flight_flags_ |= FLIGHT_ARM_DONE;
+        persist_.saveFlightFlags(flight_flags_);
+    }
+}
+
+bool System::armFlightGateOpen(uint32_t now_ms) const {
+    return arm_flight_enabled_ || ug_obc_.active(now_ms) || ug_rcu_.active(now_ms);
+}
+
+uint8_t System::armFlightFlags(uint32_t now_ms) const {
+    uint8_t f = 0;
+    if (arm_flight_enabled_)               f |= DL_ARM_FLIGHT_SWITCH;
+    if (ug_obc_.active(now_ms))            f |= DL_ARM_FLIGHT_UG_OBC;
+    if (ug_rcu_.active(now_ms))            f |= DL_ARM_FLIGHT_UG_RCU;
+    if (arm_flight_.tableOk())             f |= DL_ARM_FLIGHT_TABLE_OK;
+    if (arm_flight_.resumed())             f |= DL_ARM_FLIGHT_RESUMED;
+    if (arm_flight_.holding())             f |= DL_ARM_FLIGHT_HOLD;
+    if (flight_flags_ & FLIGHT_ARM_STARTED) f |= DL_ARM_FLIGHT_STARTED;
+    if (flight_flags_ & FLIGHT_ARM_DONE)    f |= DL_ARM_FLIGHT_DONE;
+    return f;
+}
+
+void System::sendArmFlightStatus(uint32_t now_ms) {
+    if (!downlink_ready_ || !downlink_) return;
+    const ArmFlightTable& t = arm_flight_.table();
+    downlink_->sendArmFlight(static_cast<uint8_t>(arm_flight_.phase()), armFlightFlags(now_ms),
+                             arm_flight_.faultSticky(), arm_flight_.step(), arm_flight_.maxErrDeg(),
+                             t.valid ? t.joints : 0, arm_flight_.faultLive(),
+                             static_cast<uint8_t>(t.crc32 & 0xFF));
+}
+
+void System::setArmFlightEnable(bool enable) {
+    arm_flight_enabled_ = enable;
+    persist_.saveArmFlightEnable(enable);
+    Serial.printf("%s [System]: Flug-Schalter Roboterarm %s.\n", enable ? "WARN " : "INFO ",
+                  enable ? "AN - in ROBOT_ARM faehrt der Arm sofort, auch ohne Schwerelosigkeit"
+                         : "aus");
+    if (downlink_ready_ && downlink_) sendArmFlightStatus(millis());
 }
 
 void System::updateCheckpoint(uint32_t now_ms) {
@@ -892,6 +1051,9 @@ void System::updateCheckpoint(uint32_t now_ms) {
     if (seconds == last_checkpoint_s_) return;
     last_checkpoint_s_ = seconds;
     persist_.saveCheckpoint(seconds);
+    // Fortschritt der Flug-Trajektorie fuer ein Fortsetzen nach Neustart.
+    // Hoechstens 1 s alt - resume() sucht ab hier RESUME_SEARCH_STEPS weit.
+    if (arm_flight_.active()) persist_.saveArmStep(arm_flight_.step());
 }
 
 bool System::commandAllowed(UplinkOpcode op) const {
@@ -912,17 +1074,17 @@ bool System::commandAllowed(UplinkOpcode op) const {
         case MissionState::DESCENT:
             return false;
 
-        // Rampe vor LO: Startabbruch muss moeglich sein, Motorfahrten nicht.
+        // Rampe vor LO: Stopp-Kommandos ja, Motorfahrten nicht. Startabbruch
+        // = STATE_RESET (oben).
         case MissionState::ARMED:
-            return op == UplinkOpcode::ABORT ||
-                   op == UplinkOpcode::MOTOR_OFF || op == UplinkOpcode::MOTOR2_OFF ||
+            return op == UplinkOpcode::MOTOR_OFF || op == UplinkOpcode::MOTOR2_OFF ||
                    op == UplinkOpcode::ARM_STOP || op == UplinkOpcode::ARM_INHIBIT ||
-                   op == UplinkOpcode::FORCE_TARE;
+                   op == UplinkOpcode::FORCE_TARE || op == UplinkOpcode::CAMERA ||
+                   op == UplinkOpcode::ARM_FLIGHT_ENABLE;   // nur ausschalten, siehe unten
 
         // Boden: alles; Motorfahrten prueft handleUplink() weiter auf TEST.
         case MissionState::PRE_LAUNCH:
         case MissionState::TEST:
-        case MissionState::ABORT:
             return true;
     }
     return false;
@@ -954,13 +1116,23 @@ void System::handleUplink(uint32_t now_ms) {
             case UplinkOpcode::TEST_EXIT:
                 state_machine_.exitTest(now_ms);
                 continue;
-            case UplinkOpcode::ABORT:
-                Serial.println("WARN  [System]: ABORT per Telecommand empfangen.");
-                state_machine_.abort(now_ms);
-                continue;
             case UplinkOpcode::STATE_RESET:
                 state_machine_.resetToPreLaunch(now_ms);
                 continue;
+
+            case UplinkOpcode::ARM_FLIGHT_ENABLE: {
+                // Einschalten nur in PRE_LAUNCH (letzter Schritt vor dem Flug),
+                // ausschalten ueberall, wo das Kommando ankommt (Boden + ARMED).
+                const bool enable = cmd.arg != 0;
+                if (enable && state_machine_.getState() != MissionState::PRE_LAUNCH) {
+                    Serial.printf("WARN  [System]: ARM_FLIGHT_ENABLE an nur in PRE_LAUNCH - "
+                                  "im Zustand %s abgewiesen.\n",
+                                  StateMachine::toString(state_machine_.getState()));
+                    continue;
+                }
+                setArmFlightEnable(enable);
+                continue;
+            }
 
             case UplinkOpcode::FORCE_TARE:
                 // Nullen ist ein reiner SENSOR-Eingriff, kein Aktor - deshalb
@@ -1016,6 +1188,28 @@ void System::handleUplink(uint32_t now_ms) {
                 } else if (node <= ARM_MAX_JOINTS) {
                     arm_->sendCommand(node, stop ? ArmMsg::STOP : ArmMsg::INHIBIT);
                 }
+                continue;
+            }
+
+            case UplinkOpcode::CAMERA: {
+                // High-Byte = Kamera 1..4 (0 = alle), Low-Byte = CamAction.
+                const uint8_t cam    = static_cast<uint8_t>((static_cast<uint16_t>(cmd.arg) >> 8) & 0xFF);
+                const uint8_t action = static_cast<uint8_t>(static_cast<uint16_t>(cmd.arg) & 0xFF);
+                if (cam > CAM_COUNT || action < 1 || action > 3) {
+                    Serial.printf("WARN  [System]: TC CAMERA mit ungueltigem ARG 0x%04X - ignoriert.\n",
+                                  static_cast<uint16_t>(cmd.arg));
+                    continue;
+                }
+                const CamAction a = static_cast<CamAction>(action);
+                if (a == CamAction::STOP && !StateMachine::isGround(state_machine_.getState())) {
+                    Serial.println("WARN  [System]: TC CAMERA Stopp nur am Boden (PRE_LAUNCH/TEST) - abgewiesen.");
+                    continue;
+                }
+                Serial.printf("INFO  [System]: TC CAMERA %s Kamera %u%s\n",
+                              a == CamAction::START ? "Start" : a == CamAction::STOP ? "Stopp" : "Abfrage",
+                              cam, cam == 0 ? " (alle)" : "");
+                if (!cam_ || !cam_ready_) continue;
+                if (cam == 0) cam_->requestAll(a); else cam_->request(cam - 1, a);
                 continue;
             }
 

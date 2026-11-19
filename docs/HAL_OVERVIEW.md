@@ -10,7 +10,7 @@ the source of truth for pins is `include/pin_config.hpp`, for wire formats
 ```
 src/main.cpp              setup()/loop(), hardware watchdog
 src/system.cpp            System: owns every module, runs the loop
-src/statemachine/         PRE_LAUNCH / TEST / ABORT
+src/statemachine/         ground and flight states
 src/storage/              persistent state (EEPROM), SD-card log
 src/hal/                  one file per hardware module (see below)
 src/hardwareTest/         standalone test sketches, excluded from the build
@@ -32,6 +32,7 @@ machine, and drives the outputs.
 | `UplinkReceiver` | Serial4 RX | 16 | 6-byte telecommand frame, CRC-8 |
 | `TelemetryDownlink` | Serial4 TX, 38400 baud | 17 | 20-byte frame, CRC-8, no ACK |
 | `REXUSHAL` | L0, SOE, SODS (open drain, active low) | 40, 39, 38 | Debounced, sent down as raw levels only. They trigger no transitions in this build |
+| `CameraHAL` | 4× RunCam Split 4 V2 via CD4052B mux, Serial5 | TX 20, RX 21, mux A 19, B 22 | RunCam Device Protocol, CRC-8/DVB-S2. One camera at a time; probes one per second, status in `SYS/CAMERA` (03/07) |
 | `ArmLink` | Robot arm control unit (RCU, STM32), Serial1 | RX 0, TX 1 | LISA-ODISEE ICD v0.9 frames, CRC-32/MPEG-2. Baud rate `rates::ARM_BAUDRATE` (115200, **unconfirmed**) |
 
 Up- and downlink share one UART (`Serial4`) to the REXUS service module (RXSM).
@@ -72,7 +73,6 @@ Timing lives in one file: `include/mission_timeline.hpp`.
 
 ```
 Ground:  PRE_LAUNCH ──TEST_ENTER──► TEST ──TEST_EXIT──► PRE_LAUNCH
-         PRE_LAUNCH / TEST / ARMED ──ABORT──► ABORT
          any state ──STATE_RESET──► PRE_LAUNCH   (test tool)
 
 Flight:  PRE_LAUNCH / TEST ──SODS──► ARMED ──LO──► ASCENT ──SOE or 70 s──► EXPERIMENT (t0)
@@ -86,8 +86,7 @@ Flight:  PRE_LAUNCH / TEST ──SODS──► ARMED ──LO──► ASCENT �
 |---|---|---|
 | 0 | PRE_LAUNCH | all (motor moves only in TEST) |
 | 6 | TEST | all |
-| 5 | ABORT | all except motor moves; STATE_RESET leaves |
-| 1 | ARMED | ABORT, MOTOR_OFF, FORCE_TARE (launch scrub) |
+| 1 | ARMED | MOTOR_OFF, ARM_STOP/INHIBIT, FORCE_TARE, CAMERA (no stop); launch scrub = STATE_RESET |
 | 2, 3, 7 | ASCENT, EXPERIMENT, ROBOT_ARM | none except STATE_RESET |
 | 4 | DESCENT | none except STATE_RESET (MOTOR_OFF would release the lock) |
 
@@ -99,8 +98,9 @@ releases the DESCENT lock.
 - At power-on the motor pins are LOW (DRV8871 coasts, mechanical lock holds).
 - **REXUS signals are ground truth.** A later signal implies the earlier ones:
   LO goes to ASCENT and SOE to EXPERIMENT from every ground state (PRE_LAUNCH,
-  TEST, ABORT) and from ARMED, even if SODS or LO was missed. Only SODS
-  respects ABORT, so a launch scrub on the pad still works before LO.
+  TEST) and from ARMED, even if SODS or LO was missed. The former ABORT state
+  was removed on 2026-11-17 (value 5 and opcode 0x1F stay reserved);
+  STATE_RESET does the same.
 - Signals must be stable for 200 ms (`REXUSHAL::SIGNAL_STABLE_MS`) to count.
 - On every return to PRE_LAUNCH, a signal that is still asserted only counts
   again after it has been released (`FLIGHT_IGNORE_*`, stored in EEPROM). So
@@ -114,7 +114,8 @@ releases the DESCENT lock.
   reset or power loss the sequence continues at the stored time, at most ~1 s
   plus the outage late.
 - `StateMachine::stateAfterReboot()` is the single place that decides the start
-  state: flight states and ABORT are resumed, TEST falls back to PRE_LAUNCH.
+  state: flight states are resumed, TEST (and an old stored ABORT) fall back to
+  PRE_LAUNCH.
 - Each HDRM move is started at most once per flight (flag in EEPROM, written
   before the move). A reboot during a move does not repeat it, because a
   second relative turn from an unknown position could drive into the end stop.
@@ -127,16 +128,16 @@ releases the DESCENT lock.
 |---|---|---|
 | `0x10` | TEST_ENTER | PRE_LAUNCH |
 | `0x11` | TEST_EXIT | TEST |
-| `0x1F` | ABORT | PRE_LAUNCH, TEST, ARMED |
 | `0x12` | STATE_RESET | any |
 | `0x20` | FORCE_TARE (arg 0 = both, 1, 2) | ground states, ARMED |
 | `0x30 0x31` | ARM_STOP, ARM_INHIBIT (arg high byte = joint, 0 = all) | ground states, ARMED |
 | `0x35` | ARM_BLINK (joint) | ground states |
+| `0x40` | CAMERA (high byte = camera 1..4, 0 = all; low byte 1 start, 2 stop, 3 probe) | ground states; ARMED without stop |
 | `0x32 0x33 0x34` | ARM_RELEASE, ARM_JOG (±1..30°), ARM_SET_VELOCITY (°/s) | TEST |
 
 Arm commands carry the joint (node ID 1..8) in the high byte of the argument
 and the value in the low byte. On every transition that stops the motors
-(leaving TEST, ABORT, flight start, return to PRE_LAUNCH) the OBC also sends
+(leaving TEST, flight start, return to PRE_LAUNCH) the OBC also sends
 STOP and INHIBIT to all joints. The flight sequence in `ROBOT_ARM` is still a
 placeholder.
 | `0x00`, `0x08` | MOTOR_OFF, MOTOR2_OFF | ground states, ARMED |

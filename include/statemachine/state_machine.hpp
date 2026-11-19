@@ -8,18 +8,16 @@
  * @brief MAGGIE Zustandsmaschine - Boden- und Flugablauf
  *
  *   PRE_LAUNCH ──TC TEST_ENTER──► TEST ──TC TEST_EXIT──► PRE_LAUNCH
- *   PRE_LAUNCH / TEST / ARMED ──TC ABORT──► ABORT
  *   jeder Zustand ──TC STATE_RESET──► PRE_LAUNCH   (Testwerkzeug)
  *
  *   PRE_LAUNCH / TEST ──SODS──► ARMED ──LO──► ASCENT ──SOE / 70 s──► EXPERIMENT
  *   EXPERIMENT ──HDRMs offen──► ROBOT_ARM ──t0+115 s──► DESCENT
  *
  * REXUS-Signale sind Wahrheit: Ein spaeteres Signal schliesst die frueheren
- * ein. LO fuehrt aus JEDEM Bodenzustand (auch ABORT, auch ohne SODS) nach
- * ASCENT, SOE direkt nach EXPERIMENT. Fehlt ein Signal oder ein Telecommand
- * am Boden, startet das Experiment trotzdem, sobald die Rakete fliegt.
- * Nur SODS respektiert ABORT - so bleibt ein Startabbruch auf der Rampe
- * moeglich, solange LO nicht kam.
+ * ein. LO fuehrt aus JEDEM Bodenzustand (auch ohne SODS) nach ASCENT, SOE
+ * direkt nach EXPERIMENT. Fehlt ein Signal oder ein Telecommand am Boden,
+ * startet das Experiment trotzdem, sobald die Rakete fliegt.
+ * Startabbruch auf der Rampe (ARMED, vor LO): STATE_RESET.
  *
  * Die Zustandsmaschine entscheidet nur UEBER Zustaende und Zeiten. Was in
  * einem Zustand passiert (HDRM-Fahrten, Motorsperre) und welche Telecommands
@@ -57,8 +55,8 @@ public:
     /**
      * @brief In welchem Zustand nach einem Neustart weitermachen?
      *
-     * EINZIGE Stelle, die das entscheidet. Flugzustaende und ABORT werden
-     * fortgesetzt, TEST faellt auf PRE_LAUNCH zurueck.
+     * EINZIGE Stelle, die das entscheidet. Flugzustaende werden fortgesetzt,
+     * TEST (und ein alter ABORT-Eintrag) fallen auf PRE_LAUNCH zurueck.
      */
     static MissionState stateAfterReboot(uint8_t stored, bool valid);
 
@@ -66,8 +64,6 @@ public:
     bool enterTest(uint32_t now_ms);
     /// Telecommand TEST_EXIT - nur aus TEST.
     bool exitTest(uint32_t now_ms);
-    /// Telecommand ABORT - nur am Boden (PRE_LAUNCH, TEST, ARMED).
-    bool abort(uint32_t now_ms);
     /// Telecommand STATE_RESET -> PRE_LAUNCH - aus jedem Zustand (Testwerkzeug).
     bool resetToPreLaunch(uint32_t now_ms);
 
@@ -79,8 +75,7 @@ public:
 
     /// Bodenzustaende: hier ist kein Flug im Gang.
     static bool isGround(MissionState s) {
-        return s == MissionState::PRE_LAUNCH || s == MissionState::TEST ||
-               s == MissionState::ABORT;
+        return s == MissionState::PRE_LAUNCH || s == MissionState::TEST;
     }
 
     /// Zustaende, deren verstrichene Zeit ueber einen Neustart gerettet wird.

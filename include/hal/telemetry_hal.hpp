@@ -178,7 +178,30 @@ enum class DownlinkSysMsg : uint8_t {
     UPLINK_RAW = 0x03,   ///< Rohe Kopfbytes des zuletzt empfangenen Uplink-Bursts
     ARM_LINK   = 0x04,   ///< Empfangsstatistik der Arm-UART (SYS = Vorrangspur)
     ARM_TRAJ   = 0x05,   ///< Status des Trajektorientests (ArmTrajPlayer)
+    ARM_FLIGHT = 0x06,   ///< Status der Flug-Trajektorie (ArmFlightPlayer) + Freigabe
+    CAMERA     = 0x07,   ///< Status der 4 Kameras (CameraHAL)
+    CAMERA_INFO = 0x08,  ///< Geraeteinfo EINER Kamera (reihum, 1 Hz)
 };
+
+// SYS/CAMERA - Flags je Kamera (DATA[0..3] = Kamera 1..4)
+static constexpr uint8_t DL_CAM_ALIVE      = 0x01;  ///< Antwort juenger als CAM_ALIVE_MS
+static constexpr uint8_t DL_CAM_ANSWERED   = 0x02;  ///< seit dem Start mindestens einmal geantwortet
+static constexpr uint8_t DL_CAM_FEAT_START = 0x04;  ///< kann START_RECORDING
+static constexpr uint8_t DL_CAM_FEAT_STOP  = 0x08;  ///< kann STOP_RECORDING
+static constexpr uint8_t DL_CAM_SENT_START = 0x10;  ///< zuletzt gesendet: START
+static constexpr uint8_t DL_CAM_SENT_STOP  = 0x20;  ///< zuletzt gesendet: STOP
+static constexpr uint8_t DL_CAM_RX_ANY     = 0x40;  ///< Diagnose: je ein Byte auf eine Abfrage empfangen
+static constexpr uint8_t DL_CAM_RX_GARBAGE = 0x80;  ///< Diagnose: Bytes, aber keine gueltige Antwort
+
+// SYS/ARM_FLIGHT - flags (DATA[1])
+static constexpr uint8_t DL_ARM_FLIGHT_SWITCH   = 0x01;  ///< Flug-Schalter an
+static constexpr uint8_t DL_ARM_FLIGHT_UG_OBC   = 0x02;  ///< OBC-IMU misst Schwerelosigkeit
+static constexpr uint8_t DL_ARM_FLIGHT_UG_RCU   = 0x04;  ///< RCU-IMU misst Schwerelosigkeit
+static constexpr uint8_t DL_ARM_FLIGHT_TABLE_OK = 0x08;  ///< eingebaute Tabelle geprueft und ok
+static constexpr uint8_t DL_ARM_FLIGHT_RESUMED  = 0x10;  ///< nach Neustart fortgesetzt
+static constexpr uint8_t DL_ARM_FLIGHT_STARTED  = 0x20;  ///< in diesem Flug gestartet (EEPROM)
+static constexpr uint8_t DL_ARM_FLIGHT_DONE     = 0x40;  ///< in diesem Flug fertig (EEPROM)
+static constexpr uint8_t DL_ARM_FLIGHT_HOLD     = 0x80;  ///< Bahn wartet auf ein nachhaengendes Gelenk
 
 // SYS/ARM_LINK - flags, uebertragen in STATUS2
 static constexpr uint8_t DL_ARM_LINK_ALIVE = 0x01;  ///< bit0: gueltiges Frame juenger als ARM_LINK_TIMEOUT_MS
@@ -347,6 +370,31 @@ public:
      */
     void sendArmTraj(uint8_t phase, uint8_t result, uint8_t node, uint16_t step,
                      float max_err_deg, uint8_t runs);
+
+    /**
+     * @brief SYS/ARM_FLIGHT: Status der Flug-Trajektorie (ArmFlightPlayer).
+     *
+     * DATA: [phase flags fault_sticky step(uint16 BE) max_err(uint16 BE,
+     *        0,01 Grad, gesaettigt) joints]
+     * STATUS1 = fault_live, STATUS2 = unterstes Byte der Tabellen-CRC32.
+     * phase: ArmFlightPlayer::Phase, flags: DL_ARM_FLIGHT_*, Fehlermasken:
+     * Bit k = Tabellenspalte k. joints = Gelenke der eingebauten Tabelle.
+     */
+    void sendArmFlight(uint8_t phase, uint8_t flags, uint8_t fault_sticky, uint16_t step,
+                       float max_err_deg, uint8_t joints, uint8_t fault_live, uint8_t crc_lo);
+
+    /**
+     * @brief SYS/CAMERA: DATA[0..3] Flags (DL_CAM_*) je Kamera, DATA[4..7]
+     * Sekunden seit der letzten Antwort (255 = nie oder >= 255 s).
+     * STATUS1/STATUS2 = 0.
+     */
+    void sendCamera(const uint8_t flags[4], const uint8_t age_s[4]);
+
+    /**
+     * @brief SYS/CAMERA_INFO: DATA [Kamera 1..4][Protokoll][Features LE (2)]
+     * [Fehlversuche BE (2)][0][0]. Reihum eine Kamera pro Sekunde.
+     */
+    void sendCameraInfo(uint8_t cam, uint8_t protocol, uint16_t features, uint16_t probes_failed);
 
     /**
      * @brief Ereignis-Frame NUR fuer die SD-Karte (EVENT/STATE).

@@ -315,6 +315,52 @@ void TelemetryDownlink::sendArmTraj(uint8_t phase, uint8_t result, uint8_t node,
               0, data, 0, 0);
 }
 
+void TelemetryDownlink::sendArmFlight(uint8_t phase, uint8_t flags, uint8_t fault_sticky,
+                                      uint16_t step, float max_err_deg, uint8_t joints,
+                                      uint8_t fault_live, uint8_t crc_lo) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [phase flags fault_sticky step(uint16 BE) max_err(uint16 BE, 0,01 Grad) joints]
+    data[0] = phase;
+    data[1] = flags;
+    data[2] = fault_sticky;
+    putU16(&data[3], step);
+    float cdeg = max_err_deg * 100.0f + 0.5f;
+    if (cdeg < 0.0f) cdeg = 0.0f;
+    if (cdeg > 65535.0f) cdeg = 65535.0f;
+    putU16(&data[5], static_cast<uint16_t>(cdeg));
+    data[7] = joints;
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::ARM_FLIGHT),
+              0, data, fault_live, crc_lo);
+}
+
+void TelemetryDownlink::sendCamera(const uint8_t flags[4], const uint8_t age_s[4]) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+    for (uint8_t i = 0; i < 4; ++i) {
+        data[i]     = flags[i];
+        data[4 + i] = age_s[i];
+    }
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::CAMERA), 0, data, 0, 0);
+}
+
+void TelemetryDownlink::sendCameraInfo(uint8_t cam, uint8_t protocol, uint16_t features,
+                                       uint16_t probes_failed) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+    data[0] = cam;
+    data[1] = protocol;
+    data[2] = static_cast<uint8_t>(features & 0xFF);
+    data[3] = static_cast<uint8_t>(features >> 8);
+    putU16(&data[4], probes_failed);
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::CAMERA_INFO), 0, data, 0, 0);
+}
+
 void TelemetryDownlink::sendUplinkStats(uint32_t rx_bytes, uint16_t frames_ok,
                                        uint16_t frames_bad, uint8_t last_opcode) {
     uint8_t data[DOWNLINK_DATA_SIZE];

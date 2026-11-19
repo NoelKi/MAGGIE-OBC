@@ -6,7 +6,7 @@
  * @file mission_state.hpp
  * @brief MAGGIE Betriebszustaende
  *
- *   Boden:  PRE_LAUNCH, TEST, ABORT
+ *   Boden:  PRE_LAUNCH, TEST
  *   Flug:   ARMED -> ASCENT -> EXPERIMENT -> ROBOT_ARM -> DESCENT
  *           (Ablauf und Zeiten: mission_timeline.hpp)
  *
@@ -22,7 +22,8 @@ enum class MissionState : uint8_t {
     ASCENT     = 2,   ///< LO erhalten, wartet auf SOE oder ASCENT_MAX_MS
     EXPERIMENT = 3,   ///< t0: HDRMs oeffnen
     DESCENT    = 4,   ///< HDRMs zu, Motoren blockiert - bis Strom aus / STATE_RESET
-    ABORT      = 5,   ///< Abbruch am Boden: Aktoren aus
+    // 5 = frueher ABORT (am 17.11.2026 entfernt, STATE_RESET macht dasselbe).
+    //     NICHT neu vergeben: alte EEPROM-Inhalte und Logs enthalten ihn noch.
     TEST       = 6,   ///< Bodentest: Aktoren per Telecommand frei
     ROBOT_ARM  = 7,   ///< Roboterarm-Bewegungen (Platzhalter, noch nicht implementiert)
 };

@@ -33,7 +33,7 @@
  *
  * Abbruch (STOP + INHIBIT an ALLE beteiligten Gelenke): Schleppfehler zu
  * gross, keine JOINT_STATE mehr, TX-Puffer voll, Rueckfahrt dauert zu lange.
- * Von aussen: cancel() bei ARM_STOP/ARM_INHIBIT, TEST verlassen, ABORT.
+ * Von aussen: cancel() bei ARM_STOP/ARM_INHIBIT, TEST verlassen.
  *
  * Grenzen (doppelt, auch das Skript prueft sie): jedes Ziel liegt innerhalb
  * +-MAX_DEG um den Startwinkel des Gelenks, Geschwindigkeit <= MAX_VEL_DEG_S.
@@ -104,7 +104,7 @@ public:
         TRACK_ERROR   = 5,   ///< Schleppfehler zu gross
         TX_FULL       = 6,   ///< TX-Puffer voll
         FINISH_TIMEOUT = 7,  ///< Startwinkel nicht erreicht
-        CANCELLED     = 8,   ///< ARM_STOP/ARM_INHIBIT, TEST verlassen, ABORT
+        CANCELLED     = 8,   ///< ARM_STOP/ARM_INHIBIT, TEST verlassen
         REFUSED       = 9,   ///< Start abgelehnt (Tabelle, Gelenk, Link)
     };
 

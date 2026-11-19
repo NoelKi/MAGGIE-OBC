@@ -71,4 +71,10 @@ constexpr uint32_t ARM_IMU_INTERVAL_MS   = 200;   // 5 Hz
 /// Spannung + Temperatur je Gelenk, nur bei neuem Wert.
 constexpr uint32_t ARM_POWER_INTERVAL_MS = 1000;  // 1 Hz
 
+/// Baudrate der Kamera-UART (Serial5, RunCam Device Protocol). Standard der
+/// RunCam-Kameras, an der Split 4 V2 UNBESTAETIGT - antwortet keine Kamera
+/// (SYS/CAMERA, Flag ANSWERED fehlt), zuerst hier und in den Kamera-
+/// Einstellungen (UART-Modus) nachsehen.
+constexpr uint32_t CAM_BAUDRATE = 115200;
+
 }  // namespace rates

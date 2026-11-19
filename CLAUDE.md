@@ -41,5 +41,43 @@ Mikrogravitation getestet.
 - Die Schutzmechanismen nicht lockern: Jog-Limit `ARM_JOG_MAX_DEG`, die
   Grenzen des `ArmTrajPlayer` (Gelenkzahl, Winkel, Geschwindigkeit), Freigabe
   nur in TEST, STOP + INHIBIT an alle Gelenke beim Verlassen von TEST und bei
-  ABORT (`System::stopArm()`). Soll daran etwas geändert werden, vorher beim
+  jeder Rueckkehr nach PRE_LAUNCH (`System::stopArm()`). Soll daran etwas geändert werden, vorher beim
   Nutzer nachfragen.
+
+### 3. Flug-Trajektorie (`ArmFlightPlayer`)
+
+Der ganze Arm fährt nur im Flug: `ArmFlightPlayer` spielt
+`include/arm_flight_trajectory.hpp` (aus der Flug-CSV, `tools/arm_trajectory.py
+flight`) im Zustand ROBOT_ARM ab. Vom Nutzer am 17.11.2026 so festgelegt:
+
+- Freigabe in ROBOT_ARM: Flug-Schalter (`ARM_FLIGHT_ENABLE`, GUI) ODER
+  gemessene Schwerelosigkeit (`MicrogravityDetector`, OBC- oder RCU-IMU).
+  Der Schalter geht nur in PRE_LAUNCH an. TEST betreten und jede Rueckkehr
+  nach PRE_LAUNCH (STATE_RESET, TEST_EXIT) schalten ihn aus, ein Neustart nicht.
+  Schwelle, Haltezeit und die Schutzpruefungen gegen einen defekten Sensor
+  (Nullvektor, eingefrorener Wert, Luecke) nicht lockern.
+- Bei Gelenkproblemen weiterfahren, nicht abbrechen und nicht direkt in die
+  Verstaupose (Kollisionsgefahr). Nach OBC-Neustart am gesicherten Schritt
+  fortsetzen.
+- Die Tabelle wird beim Booten geprueft (CRC, Grenzen, Ende = Start); faellt
+  die Pruefung durch, faehrt der Arm nicht. Die Grenzen in `ArmFlightPlayer`
+  und `FLIGHT_*` im Skript gehoeren zusammen.
+- Den Flug-Player nie in TEST/PRE_LAUNCH starten und keine Abkuerzung bauen,
+  die ihn am Boden ohne Schalter/Schwerelosigkeit startet.
+- Aenderungen am Player erst in der Host-Simulation pruefen:
+  `tools/flight_sim/run.sh` muss "ALLES OK" melden.
+
+### 4. Kameras (`CameraHAL`)
+
+4x RunCam Split 4 V2 an Serial5 ueber den CD4052B-Mux (Pins in
+`pin_config.hpp`). Vom Nutzer am 17.11.2026 so festgelegt:
+
+- Die Kameras nehmen selbst ab dem Einschalten auf (Kamera-Einstellung) und
+  laufen bis Strom aus. Der OBC schickt im Flug **nie** STOP_RECORDING und
+  nie die Power-Taste (schaltet um, ohne Rueckmeldung).
+- Zur Sicherheit START_RECORDING an alle bei ARMED, ASCENT, EXPERIMENT und
+  nach einem Neustart im Flug (`System::CAM_SAFETY_START`). Vor dem Flug am
+  Boden pruefen, dass START eine laufende Aufnahme nicht beendet.
+- STOP per Telecommand nur am Boden (PRE_LAUNCH/TEST).
+- Aenderungen am Treiber erst im Host-Test pruefen:
+  `tools/camera_sim/run.sh` muss "ALLES OK" melden.

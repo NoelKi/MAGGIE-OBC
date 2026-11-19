@@ -19,6 +19,10 @@
  *   9..10 ~checkpoint_s
  *   11    flight_flags - welche HDRM-Fahrten schon begonnen wurden (FLIGHT_*)
  *   12    ~flight_flags
+ *   13    arm_enable   - Flug-Schalter des Roboterarms (0x01 = an)
+ *   14    ~arm_enable
+ *   15..18 arm_step A  - Schritt der Flug-Trajektorie + Pruefwert (je uint16)
+ *   19..22 arm_step B  - zweites Fach, abwechselnd beschrieben
  *
  * Jeder Wert hat ein invertiertes Pruefbyte. Ein ungueltiger Wert (nie
  * beschrieben, Stromausfall mitten im Schreiben) liest sich als 0.
@@ -34,6 +38,11 @@
 /// sie unterbrochen hat). Jede HDRM-Fahrt laeuft hoechstens EINMAL pro Flug.
 static constexpr uint8_t FLIGHT_HDRM_OPENED = 0x01;   ///< beide HDRMs: Oeffnen begonnen
 static constexpr uint8_t FLIGHT_HDRM_CLOSED = 0x02;   ///< beide HDRMs: Schliessen begonnen
+/// Flug-Trajektorie des Arms gestartet - nach einem Neustart fortsetzen statt
+/// neu starten (ArmFlightPlayer::resume).
+static constexpr uint8_t FLIGHT_ARM_STARTED = 0x04;
+/// Flug-Trajektorie fertig - laeuft nie ein zweites Mal.
+static constexpr uint8_t FLIGHT_ARM_DONE    = 0x08;
 
 /// Bits in flight_flags: dieses REXUS-Signal lag bei der Rueckkehr nach
 /// PRE_LAUNCH noch an und zaehlt erst wieder, nachdem es einmal abgefallen ist
@@ -68,6 +77,18 @@ public:
     uint8_t loadFlightFlags() const;
     void saveFlightFlags(uint8_t flags);
 
+    /// Flug-Schalter des Roboterarms (ARM_FLIGHT_ENABLE). false, wenn ungueltig.
+    bool loadArmFlightEnable() const;
+    void saveArmFlightEnable(bool enabled);
+
+    /// Zuletzt gesicherter Schritt der Flug-Trajektorie. false, wenn beide
+    /// Faecher ungueltig sind.
+    bool loadArmStep(uint16_t& step) const;
+    void saveArmStep(uint16_t step);
+    /// Beide Faecher auf 0 - beim Start der Flug-Trajektorie.
+    void resetArmStep();
+
 private:
     uint32_t boot_count_ = 0;
+    bool     arm_step_slot_b_ = false;   ///< naechstes Fach fuer saveArmStep
 };

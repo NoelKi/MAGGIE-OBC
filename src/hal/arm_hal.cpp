@@ -170,7 +170,10 @@ ArmJoint* ArmLink::joint(uint8_t node) {
 }
 
 bool ArmLink::linkAlive(uint32_t now_ms) const {
-    return ever_received_ && (now_ms - last_frame_ms_) < ARM_LINK_TIMEOUT_MS;
+    // Vorzeichenbehaftet: last_frame_ms_ kann juenger als now_ms sein, wenn
+    // now_ms vor poll() genommen wurde (siehe ArmTrajPlayer::update).
+    return ever_received_ &&
+           static_cast<int32_t>(now_ms - last_frame_ms_) < static_cast<int32_t>(ARM_LINK_TIMEOUT_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +200,10 @@ bool ArmLink::send(uint8_t node, ArmMsg msg, const uint8_t* payload, uint8_t len
     }
     serial_.write(frame, frame_len);
     return true;
+}
+
+int ArmLink::txFree() const {
+    return initialized_ ? serial_.availableForWrite() : 0;
 }
 
 bool ArmLink::sendCommand(uint8_t node, ArmMsg msg) {

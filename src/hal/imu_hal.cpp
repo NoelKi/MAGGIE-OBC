@@ -3,6 +3,7 @@
 // BMI088 Accelerometer registers
 static constexpr uint8_t ACC_CHIP_ID     = 0x00;
 static constexpr uint8_t ACC_DATA_START  = 0x12;
+static constexpr uint8_t ACC_TEMP_MSB    = 0x22;   // + TEMP_LSB 0x23
 static constexpr uint8_t ACC_CONF        = 0x40;
 static constexpr uint8_t ACC_RANGE       = 0x41;
 static constexpr uint8_t ACC_PWR_CONF    = 0x7C;
@@ -196,6 +197,12 @@ bool IMUHAL::read(IMUReading& reading) {
     // Sensor im Flug ab oder resettet er, liefert SPI sonst still 0xFF/0x00 -
     // und das saehe am Boden aus wie echte Messwerte. So geht stattdessen
     // DL_STATUS1_IMU_VALID auf 0.
+    // Temperatur: MSB*8 + LSB>>5, 11 Bit Zweierkomplement.
+    accelReadBytes(ACC_TEMP_MSB, raw, 2);
+    int16_t t11 = static_cast<int16_t>((raw[0] << 3) | (raw[1] >> 5));
+    if (t11 > 1023) t11 = static_cast<int16_t>(t11 - 2048);
+    reading.raw_temp = t11;
+
     reading.timestamp = millis();
     reading.valid = selfTest();
     return true;

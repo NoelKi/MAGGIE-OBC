@@ -1,4 +1,5 @@
 #include "hal/camera_hal.hpp"
+#include "obc_log.hpp"
 
 namespace {
 constexpr uint8_t CMD_GET_DEVICE_INFO = 0x00;
@@ -50,8 +51,13 @@ void CameraHAL::requestAll(CamAction action) {
 }
 
 bool CameraHAL::alive(uint8_t cam, uint32_t now_ms) const {
-    if (cam >= CAM_COUNT || !status_[cam].answered_ever) return false;
-    return now_ms - status_[cam].last_answer_ms < CAM_ALIVE_MS;
+    if (cam >= CAM_COUNT) return false;
+    const CameraStatus& s = status_[cam];
+    const bool answer = s.answered_ever &&
+        static_cast<int32_t>(now_ms - s.last_answer_ms) < static_cast<int32_t>(CAM_ALIVE_MS);
+    const bool bytes  = s.rx_any &&
+        static_cast<int32_t>(now_ms - s.last_rx_ms) < static_cast<int32_t>(CAM_ALIVE_MS);
+    return answer || bytes;
 }
 
 void CameraHAL::select(uint8_t channel) {
@@ -119,7 +125,9 @@ bool CameraHAL::readResponse(uint32_t now_ms) {
     while (serial_.available() > 0) {
         const uint8_t b = static_cast<uint8_t>(serial_.read());
         ++job_rx_bytes_;
+        if (diag_len_ < DIAG_BYTES) diag_[diag_len_++] = b;
         status_[job_cam_].rx_any = true;
+        status_[job_cam_].last_rx_ms = now_ms;
         if (rx_len_ == 0 && b != CAM_HEADER) continue;      // auf den Kopf warten
         rx_[rx_len_++] = b;
         if (rx_len_ < DEVICE_INFO_LEN) continue;
@@ -132,7 +140,7 @@ bool CameraHAL::readResponse(uint32_t now_ms) {
             s.protocol       = rx_[1];
             s.features       = static_cast<uint16_t>(rx_[2] | (rx_[3] << 8));
             if (first) {
-                Serial.printf("INFO  [Kamera]: Kamera %u antwortet (Protokoll %u, Features 0x%04X%s).\n",
+                Log.printf("INFO  [Kamera]: Kamera %u antwortet (Protokoll %u, Features 0x%04X%s).\n",
                               job_cam_ + 1, s.protocol, s.features,
                               (s.features & CAM_FEATURE_START_RECORDING) ? "" : ", KEIN START_RECORDING");
             }
@@ -145,6 +153,19 @@ bool CameraHAL::readResponse(uint32_t now_ms) {
         rx_len_ -= k;
     }
     return false;
+}
+
+void CameraHAL::logFailedProbe(uint32_t now_ms) {
+    if (diag_logged_ >= DIAG_FREE_LOGS &&
+        static_cast<int32_t>(now_ms - diag_last_ms_) < static_cast<int32_t>(DIAG_INTERVAL_MS)) return;
+    if (diag_logged_ < 0xFF) diag_logged_++;
+    diag_last_ms_ = now_ms;
+    char hex[3 * DIAG_BYTES + 1];
+    hex[0] = '\0';
+    for (uint8_t i = 0; i < diag_len_; i++) snprintf(&hex[3 * i], 4, "%02X ", diag_[i]);
+    Log.printf("INFO  [Kamera]: Kamera %u keine gueltige Antwort in %lu ms - %u Byte empfangen: %s\n",
+               job_cam_ + 1, static_cast<unsigned long>(now_ms - job_start_ms_),
+               job_rx_bytes_, diag_len_ ? hex : "(nichts)");
 }
 
 void CameraHAL::update(uint32_t now_ms) {
@@ -164,11 +185,13 @@ void CameraHAL::update(uint32_t now_ms) {
             if (!sendJob()) return;
             if (job_ == CamAction::PROBE) {
                 job_rx_bytes_ = 0;
+                diag_len_ = 0;
+                job_start_ms_ = now_ms;
                 phase_until_ = now_ms + CAM_RESPONSE_TIMEOUT_MS;
                 phase_ = Phase::WAIT_RESPONSE;
             } else {
                 status_[job_cam_].last_cmd = job_;
-                Serial.printf("INFO  [Kamera]: Kamera %u: %s gesendet.\n", job_cam_ + 1,
+                Log.printf("INFO  [Kamera]: Kamera %u: %s gesendet.\n", job_cam_ + 1,
                               job_ == CamAction::START ? "START_RECORDING" : "STOP_RECORDING");
                 phase_until_ = now_ms + CAM_TX_GAP_MS;
                 phase_ = Phase::GAP;
@@ -182,6 +205,7 @@ void CameraHAL::update(uint32_t now_ms) {
             } else if (reached(now_ms, phase_until_)) {
                 ++status_[job_cam_].probes_failed;
                 if (job_rx_bytes_ > 0) status_[job_cam_].rx_garbage = true;
+                logFailedProbe(now_ms);
                 phase_until_ = now_ms;
                 phase_ = Phase::GAP;
             }

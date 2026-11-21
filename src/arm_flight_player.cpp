@@ -1,4 +1,5 @@
 #include "arm_flight_player.hpp"
+#include "obc_log.hpp"
 #include "arm_flight_trajectory.hpp"
 #include <Arduino.h>
 #include <math.h>
@@ -44,19 +45,19 @@ int32_t ArmFlightPlayer::target(int32_t step, uint8_t col) const {
 bool ArmFlightPlayer::verifyTable() {
     table_ok_ = false;
     if (!t_.valid) {
-        Serial.println("WARN  [ArmFlight]: Keine Flug-Trajektorie eingebaut (Platzhalter) - "
+        Log.println("WARN  [ArmFlight]: Keine Flug-Trajektorie eingebaut (Platzhalter) - "
                        "der Arm faehrt im Flug NICHT.");
         return false;
     }
     if (t_.dt_ms != 100 || t_.len < 2 || t_.joints < 1 || t_.joints > ARM_MAX_JOINTS) {
-        Serial.printf("WARN  [ArmFlight]: Tabelle unbrauchbar (Takt %lu ms, %u Punkte, %u Gelenke) - "
+        Log.printf("WARN  [ArmFlight]: Tabelle unbrauchbar (Takt %lu ms, %u Punkte, %u Gelenke) - "
                       "der Arm faehrt im Flug NICHT.\n",
                       static_cast<unsigned long>(t_.dt_ms), t_.len, t_.joints);
         return false;
     }
     const uint32_t duration_ms = static_cast<uint32_t>(t_.len - 1) * t_.dt_ms;
     if (duration_ms > MAX_DURATION_MS) {
-        Serial.printf("WARN  [ArmFlight]: Tabelle dauert %lu ms, erlaubt %lu - der Arm faehrt im Flug NICHT.\n",
+        Log.printf("WARN  [ArmFlight]: Tabelle dauert %lu ms, erlaubt %lu - der Arm faehrt im Flug NICHT.\n",
                       static_cast<unsigned long>(duration_ms), static_cast<unsigned long>(MAX_DURATION_MS));
         return false;
     }
@@ -65,7 +66,7 @@ bool ArmFlightPlayer::verifyTable() {
         bool dup = false;
         for (uint8_t m = 0; m < k; m++) dup |= t_.nodes[m] == node;
         if (node < 1 || node > ARM_MAX_JOINTS || dup) {
-            Serial.printf("WARN  [ArmFlight]: Node %u in Spalte %u ungueltig oder doppelt - "
+            Log.printf("WARN  [ArmFlight]: Node %u in Spalte %u ungueltig oder doppelt - "
                           "der Arm faehrt im Flug NICHT.\n", node, k + 1);
             return false;
         }
@@ -74,7 +75,7 @@ bool ArmFlightPlayer::verifyTable() {
     const size_t bytes = static_cast<size_t>(t_.len) * t_.joints * sizeof(int32_t);
     const uint32_t crc = ArmLink::crc32(reinterpret_cast<const uint8_t*>(t_.urad), bytes);
     if (crc != t_.crc32) {
-        Serial.printf("WARN  [ArmFlight]: CRC der Tabelle 0x%08lX statt 0x%08lX (von Hand veraendert?) - "
+        Log.printf("WARN  [ArmFlight]: CRC der Tabelle 0x%08lX statt 0x%08lX (von Hand veraendert?) - "
                       "der Arm faehrt im Flug NICHT.\n",
                       static_cast<unsigned long>(crc), static_cast<unsigned long>(t_.crc32));
         return false;
@@ -86,13 +87,13 @@ bool ArmFlightPlayer::verifyTable() {
     const int32_t end_tol  = degToUrad(END_TOL_DEG);
     for (uint8_t k = 0; k < t_.joints; k++) {
         if (absI32(target(last(), k) - target(0, k)) > end_tol) {
-            Serial.printf("WARN  [ArmFlight]: Spalte %u endet nicht in der Startpose - "
+            Log.printf("WARN  [ArmFlight]: Spalte %u endet nicht in der Startpose - "
                           "der Arm faehrt im Flug NICHT.\n", k + 1);
             return false;
         }
         for (uint16_t i = 1; i < t_.len; i++) {
             if (absI32(target(i, k) - target(i - 1, k)) > max_step) {
-                Serial.printf("WARN  [ArmFlight]: Spalte %u Schritt %u schneller als %.0f Grad/s - "
+                Log.printf("WARN  [ArmFlight]: Spalte %u Schritt %u schneller als %.0f Grad/s - "
                               "der Arm faehrt im Flug NICHT.\n", k + 1, i, MAX_VEL_DEG_S);
                 return false;
             }
@@ -100,10 +101,10 @@ bool ArmFlightPlayer::verifyTable() {
     }
 
     table_ok_ = true;
-    Serial.printf("INFO  [ArmFlight]: Flug-Trajektorie OK - %u Punkte (%.1f s), %u Gelenke, CRC 0x%08lX.\n",
+    Log.printf("INFO  [ArmFlight]: Flug-Trajektorie OK - %u Punkte (%.1f s), %u Gelenke, CRC 0x%08lX.\n",
                   t_.len, duration_ms / 1000.0f, t_.joints, static_cast<unsigned long>(crc));
     for (uint8_t k = 0; k < t_.joints; k++) {
-        Serial.printf("INFO  [ArmFlight]:   Spalte %u -> Node %u, Startpose %+.2f Grad.\n",
+        Log.printf("INFO  [ArmFlight]:   Spalte %u -> Node %u, Startpose %+.2f Grad.\n",
                       k + 1, t_.nodes[k], uradToDeg(target(0, k)));
     }
     return true;
@@ -143,7 +144,7 @@ bool ArmFlightPlayer::start(ArmLink& arm, uint32_t now_ms) {
     step_        = 0;
     last_log_ms_ = now_ms;
     setPhase(Phase::APPROACH, now_ms);
-    Serial.printf("INFO  [ArmFlight]: Start - Gelenke freigegeben, fahren langsam auf die Startpose "
+    Log.printf("INFO  [ArmFlight]: Start - Gelenke freigegeben, fahren langsam auf die Startpose "
                   "(hoechstens %lu ms).\n", static_cast<unsigned long>(APPROACH_TIMEOUT_MS));
     return true;
 }
@@ -157,10 +158,10 @@ bool ArmFlightPlayer::resume(uint16_t saved_step, bool saved_valid, uint32_t now
     last_log_ms_ = now_ms;
     setPhase(Phase::RESUME_WAIT, now_ms);
     if (saved_valid) {
-        Serial.printf("INFO  [ArmFlight]: Fortsetzen nach Neustart, gesicherter Schritt %u - "
+        Log.printf("INFO  [ArmFlight]: Fortsetzen nach Neustart, gesicherter Schritt %u - "
                       "warte auf Gelenkmeldungen.\n", saved_step_);
     } else {
-        Serial.println("WARN  [ArmFlight]: Fortsetzen nach Neustart OHNE gesicherten Schritt - "
+        Log.println("WARN  [ArmFlight]: Fortsetzen nach Neustart OHNE gesicherten Schritt - "
                        "suche den passenden Punkt in der ganzen Tabelle.");
     }
     return true;
@@ -168,7 +169,7 @@ bool ArmFlightPlayer::resume(uint16_t saved_step, bool saved_valid, uint32_t now
 
 void ArmFlightPlayer::cancel(const char* reason) {
     if (!active()) return;
-    Serial.printf("WARN  [ArmFlight]: abgebrochen (%s) bei Schritt %u.\n", reason, step_);
+    Log.printf("WARN  [ArmFlight]: abgebrochen (%s) bei Schritt %u.\n", reason, step_);
     phase_   = Phase::IDLE;
     changed_ = true;
 }
@@ -230,7 +231,7 @@ void ArmFlightPlayer::monitor(ArmLink& arm, uint32_t now_ms, int32_t ref, bool t
     for (uint8_t k = 0; k < t_.joints; k++) {
         if (!(fresh_faults & (1u << k))) continue;
         const ArmJoint* j = arm.joint(t_.nodes[k]);
-        Serial.printf("WARN  [ArmFlight]: Node %u %s - Bahn laeuft weiter.\n", t_.nodes[k],
+        Log.printf("WARN  [ArmFlight]: Node %u %s - Bahn laeuft weiter.\n", t_.nodes[k],
                       fresh(j, now_ms) ? "folgt nicht (Schleppfehler)" : "meldet sich nicht");
     }
     if (live != fault_live_) changed_ = true;
@@ -292,9 +293,9 @@ uint16_t ArmFlightPlayer::bestResumeStep(ArmLink& arm, uint32_t now_ms) const {
         if (s == hi) break;       // uint16-Ueberlauf bei hi = 65535 vermeiden
     }
     if (best_cost < 0.0f) {
-        Serial.printf("WARN  [ArmFlight]: Kein Gelenk meldet - setze bei Schritt %u fort.\n", best);
+        Log.printf("WARN  [ArmFlight]: Kein Gelenk meldet - setze bei Schritt %u fort.\n", best);
     } else {
-        Serial.printf("INFO  [ArmFlight]: Setze bei Schritt %u fort (gesucht %u..%u), "
+        Log.printf("INFO  [ArmFlight]: Setze bei Schritt %u fort (gesucht %u..%u), "
                       "groesste Abweichung %.2f Grad.\n", best, lo, hi, best_cost);
     }
     return best;
@@ -341,7 +342,7 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
             const bool near = allNear(arm, now_ms, 0, START_TOL_DEG);
             if (!near && !elapsed(now_ms, phase_ms_, APPROACH_TIMEOUT_MS)) return;
             if (!near) {
-                Serial.println("WARN  [ArmFlight]: Startpose nicht von allen Gelenken erreicht - "
+                Log.println("WARN  [ArmFlight]: Startpose nicht von allen Gelenken erreicht - "
                                "Bahn startet trotzdem.");
             }
             for (uint8_t k = 0; k < t_.joints; k++) {
@@ -349,17 +350,20 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
                 if (!fresh(j, now_ms)) continue;
                 const float e = fabsf(uradToDeg(j->angle_urad - target(0, k)));
                 if (e > max_err_deg_) max_err_deg_ = e;
-                Serial.printf("INFO  [ArmFlight]:   Node %u: %.2f Grad von der Startpose.\n", t_.nodes[k], e);
+                Log.printf("INFO  [ArmFlight]:   Node %u: %.2f Grad von der Startpose.\n", t_.nodes[k], e);
             }
             enterRun(0, now_ms);
-            Serial.println("INFO  [ArmFlight]: Bahn laeuft.");
+            Log.println("INFO  [ArmFlight]: Bahn laeuft.");
             return;
         }
 
         case Phase::RUN: {
             // Bahnzeit weiterzaehlen - oder warten, solange ein meldendes
             // Gelenk hinterherhaengt (lag_mask_ aus dem letzten Loop).
-            const uint32_t dt = now_ms - last_update_ms_;
+            // Nie "negativ" (siehe ArmTrajPlayer since()): ein Sprung um ~4 Mrd. ms
+            // wuerde Bahnzeit und Pausenbudget auf einen Schlag verbrauchen.
+            const int32_t dt_signed = static_cast<int32_t>(now_ms - last_update_ms_);
+            const uint32_t dt = dt_signed > 0 ? static_cast<uint32_t>(dt_signed) : 0;
             last_update_ms_ = now_ms;
             const bool hold = lag_mask_ && pause_used_ms_ < PAUSE_BUDGET_MS;
             if (hold) {
@@ -371,14 +375,14 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
                 holding_ = hold;
                 changed_ = true;
                 if (hold) {
-                    Serial.printf("WARN  [ArmFlight]: Gelenk(e) 0x%02X haengen nach - Bahn wartet "
+                    Log.printf("WARN  [ArmFlight]: Gelenk(e) 0x%02X haengen nach - Bahn wartet "
                                   "(bisher %lu von %lu ms).\n", lag_mask_,
                                   static_cast<unsigned long>(pause_used_ms_),
                                   static_cast<unsigned long>(PAUSE_BUDGET_MS));
                 } else if (pause_used_ms_ >= PAUSE_BUDGET_MS && lag_mask_) {
-                    Serial.println("WARN  [ArmFlight]: Wartezeit aufgebraucht - Bahn laeuft ohne Warten weiter.");
+                    Log.println("WARN  [ArmFlight]: Wartezeit aufgebraucht - Bahn laeuft ohne Warten weiter.");
                 } else {
-                    Serial.println("INFO  [ArmFlight]: aufgeholt, Bahn laeuft weiter.");
+                    Log.println("INFO  [ArmFlight]: aufgeholt, Bahn laeuft weiter.");
                 }
             }
 
@@ -391,7 +395,7 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
             if (s >= last()) {
                 finish_sent_ = false;
                 setPhase(Phase::FINISH, now_ms);
-                Serial.println("INFO  [ArmFlight]: Tabelle durch, Gelenke fahren in die Verstaupose.");
+                Log.println("INFO  [ArmFlight]: Tabelle durch, Gelenke fahren in die Verstaupose.");
                 return;
             }
             // Neues Ziel bei neuem Schritt - und sofort, wenn ein Gelenk neu
@@ -414,7 +418,7 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
             }
             const bool near = allNear(arm, now_ms, last(), DONE_TOL_DEG);
             if (!near && !elapsed(now_ms, phase_ms_, FINISH_TIMEOUT_MS)) return;
-            Serial.printf("%s [ArmFlight]: Fertig - %s. Groesster Schleppfehler %.2f Grad, "
+            Log.printf("%s [ArmFlight]: Fertig - %s. Groesster Schleppfehler %.2f Grad, "
                           "Fehlermaske 0x%02X.\n",
                           near ? "INFO " : "WARN ",
                           near ? "alle meldenden Gelenke in der Verstaupose"
@@ -429,15 +433,15 @@ void ArmFlightPlayer::update(ArmLink& arm, uint32_t now_ms) {
 void ArmFlightPlayer::logProgress(ArmLink& arm, uint32_t now_ms) {
     if (!elapsed(now_ms, last_log_ms_, 1000)) return;
     last_log_ms_ = now_ms;
-    Serial.printf("INFO  [ArmFlight]: Schritt %u/%u", step_, last());
+    Log.printf("INFO  [ArmFlight]: Schritt %u/%u", step_, last());
     for (uint8_t k = 0; k < t_.joints; k++) {
         const ArmJoint* j = arm.joint(t_.nodes[k]);
         if (fresh(j, now_ms)) {
-            Serial.printf(" | N%u %+.1f/%+.1f", t_.nodes[k],
+            Log.printf(" | N%u %+.1f/%+.1f", t_.nodes[k],
                           uradToDeg(target(step_, k)), uradToDeg(j->angle_urad));
         } else {
-            Serial.printf(" | N%u stumm", t_.nodes[k]);
+            Log.printf(" | N%u stumm", t_.nodes[k]);
         }
     }
-    Serial.println();
+    Log.println();
 }

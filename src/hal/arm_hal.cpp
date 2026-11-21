@@ -85,6 +85,8 @@ void ArmLink::parseBuffer() {
         const int size = payloadSize(buf_[2]);
         if (size < 0) {
             frames_bad_++;
+            unknown_ids_++;
+            if (tap_) tap_(tap_ctx_, ArmTapKind::RX_BAD_ID, buf_, len_);
             drop(1);
             continue;
         }
@@ -94,10 +96,14 @@ void ArmLink::parseBuffer() {
 
         const uint32_t expected = static_cast<uint32_t>(readI32(&buf_[ARM_HEADER_SIZE + size]));
         if (crc32(buf_, ARM_HEADER_SIZE + size) == expected) {
+            frames_ok_total_++;
+            if (tap_) tap_(tap_ctx_, ArmTapKind::RX, buf_, static_cast<uint8_t>(ARM_HEADER_SIZE + size));
             handleFrame(buf_[1], buf_[2], &buf_[ARM_HEADER_SIZE]);
             drop(frame_len);
         } else {
             frames_bad_++;
+            crc_errors_++;
+            if (tap_) tap_(tap_ctx_, ArmTapKind::RX_BAD_CRC, buf_, frame_len);
             drop(1);
         }
     }
@@ -199,6 +205,7 @@ bool ArmLink::send(uint8_t node, ArmMsg msg, const uint8_t* payload, uint8_t len
         return false;
     }
     serial_.write(frame, frame_len);
+    if (tap_) tap_(tap_ctx_, ArmTapKind::TX, frame, static_cast<uint8_t>(ARM_HEADER_SIZE + len));
     return true;
 }
 

@@ -1,4 +1,6 @@
 #include "system.hpp"
+#include "obc_log.hpp"
+#include "boot_guard.hpp"
 #include <core_pins.h>
 #include <usb_seremu.h>
 #include <usb_serial.h>
@@ -38,6 +40,11 @@ static constexpr float STANDARD_G = 9.80665f;
 // 1 Grad in Mikroradiant (pi / 180 * 1e6) - die RCU rechnet in urad.
 static constexpr float URAD_PER_DEG = 17453.2925f;
 
+// Arm-UART-Diagnose: so viele verworfene Kandidaten pro Sekunde gehen mit
+// Rohbytes in ARM_RAW.csv, und alle ARM_LINK_REPORT_MS eine Zusammenfassung ins Log.
+static constexpr uint8_t  ARM_BAD_TO_SD_PER_S = 20;
+static constexpr uint32_t ARM_LINK_REPORT_MS  = 10000;
+
 System::System() {
     // Konstruktor
 }
@@ -56,86 +63,108 @@ System::~System() {
 
 bool System::init(bool after_watchdog_reset) {
     startup_time = millis();
+    using bootguard::Scope;
+    using bootguard::disabled;
+
+    // Ab hier geht jede Meldung auch auf die SD-Karte (LOG.txt). Der SdLogger
+    // sammelt schon vor begin() im RAM - so fehlen auch die Boot-Meldungen nicht.
+    Log.setSink([](void* ctx, const char* line, size_t len) {
+        static_cast<SdLogger*>(ctx)->pushLogLine(line, len);
+    }, &sd_);
 
     printWelcomeBanner();
     // Build-Stempel: Ein Teensy laesst sich nicht auslesen - nur so ist im
     // Log erkennbar, welche Firmware tatsaechlich geflasht ist.
-    Serial.printf("INFO  [System]: Firmware-Build %s %s\n", __DATE__, __TIME__);
+    Log.printf("INFO  [System]: Firmware-Build %s %s\n", __DATE__, __TIME__);
 
     // -----------------------------------------------------------------------
     // Nichtfluechtiger Speicher - zuerst, damit Boot-Nummer und letzter
     // Zustand feststehen, bevor irgendetwas anderes startet.
     // -----------------------------------------------------------------------
-    persist_.begin();
-    Serial.printf("INFO  [System]: Boot Nr. %lu%s.\n",
+    {
+        Scope guard(Stage::INIT_PERSIST);
+        persist_.begin();
+    }
+    bootguard::watchdogFeed();
+    Log.printf("INFO  [System]: Boot Nr. %lu%s.\n",
                   static_cast<unsigned long>(persist_.bootCount()),
                   after_watchdog_reset ? " (nach Watchdog-Reset)" : "");
+    logBootGuard();
 
     // -----------------------------------------------------------------------
     // IMU (BMI088 ueber SPI) - fuer Telemetrie-Downlink
     // Fehler hier sind NICHT fatal: das System laeuft ohne Telemetrie weiter.
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere IMU (BMI088)...");
+    Log.println("INFO  [System]: Initialisiere IMU (BMI088)...");
     imu_ = new IMUHAL(PIN_CS_ACCEL, PIN_CS_GYRO, 0 /* SPI0 */);
-    imu_ready_ = imu_->init();
-    if (imu_ready_) {
-        Serial.println("INFO  [System]: IMU bereit.");
+    if (disabled(GUARD_OFF_IMU)) {
+        Log.println("WARN  [System]: IMU fuer diesen Start AUS (Boot-Guard).");
     } else {
-        Serial.println("WARN  [System]: IMU konnte nicht initialisiert werden - Telemetrie ohne IMU.");
+        Scope guard(Stage::INIT_IMU);
+        imu_ready_ = imu_->init();
+    }
+    bootguard::watchdogFeed();
+    if (imu_ready_) {
+        Log.println("INFO  [System]: IMU bereit.");
+    } else {
+        Log.println("WARN  [System]: IMU konnte nicht initialisiert werden - Telemetrie ohne IMU.");
     }
 
     // -----------------------------------------------------------------------
     // Telemetrie-Downlink (Serial4, Pin 16 RX = updownlink+ / 17 TX = updownlink-)
     // -----------------------------------------------------------------------
-    Serial.printf("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial4, Pin %u/%u)...\n",
+    Log.printf("INFO  [System]: Initialisiere Telemetrie-Downlink (Serial4, Pin %u/%u)...\n",
                   PIN_UPDOWNLINK_PLUS, PIN_UPDOWNLINK_MINUS);
+    bootguard::stage(Stage::INIT_DOWNLINK);
     downlink_ = new TelemetryDownlink(Serial4);
     downlink_ready_ = downlink_->init(rates::DOWNLINK_BAUDRATE);
     Serial4.addMemoryForWrite(serial4_tx_extra, sizeof(serial4_tx_extra));
     Serial4.addMemoryForRead(serial4_rx_extra, sizeof(serial4_rx_extra));   // Uplink
 
-    // Bordspeicher: jedes gesendete Frame geht zusaetzlich in den SD-Puffer.
-    // Fehlt die Karte, laeuft alles andere unveraendert weiter.
-    sd_.begin(persist_.bootCount(), after_watchdog_reset);
-    downlink_->setTap([](void* ctx, const uint8_t* frame, uint8_t len) {
-        static_cast<SdLogger*>(ctx)->push(frame, len);
-    }, &sd_);
+    bootguard::stage(Stage::NONE);
+
+    // Bordspeicher (SD-Karte). Fehlt die Karte, laeuft alles andere
+    // unveraendert weiter. Ordner und Dateien legt der Loop an.
+    sd_.begin(persist_.bootCount(), disabled(GUARD_OFF_SD));
+    bootguard::watchdogFeed();
+    writeSdInfo(after_watchdog_reset);
     if (downlink_ready_) {
-        Serial.printf("INFO  [System]: Downlink bereit (%lu Baud).\n",
+        Log.printf("INFO  [System]: Downlink bereit (%lu Baud).\n",
                       static_cast<unsigned long>(rates::DOWNLINK_BAUDRATE));
     } else {
-        Serial.println("WARN  [System]: Downlink konnte nicht initialisiert werden.");
+        Log.println("WARN  [System]: Downlink konnte nicht initialisiert werden.");
     }
 
     // -----------------------------------------------------------------------
     // Motor 1 (DRV8871, ungeregelt + Quadratur-Encoder als Sensor)
     // Fehler hier sind NICHT fatal: das System laeuft ohne Motor weiter.
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder, sanfte Anfahrt)...");
+    bootguard::stage(Stage::INIT_MOTOR);
+    Log.println("INFO  [System]: Initialisiere Motor 1 (DRV8871 + Encoder, sanfte Anfahrt)...");
     MotorHAL::logDriveProfile();
     motor_ = new MotorHAL(PIN_M1_A, PIN_M1_B, 1, /*soft_approach=*/true);
     motor_ready_ = motor_->init();
     if (motor_ready_) {
         motor_->initEncoder(PIN_M1_ENC_A, PIN_M1_ENC_B);
-        Serial.printf("INFO  [System]: Motor 1 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
+        Log.printf("INFO  [System]: Motor 1 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
                       PIN_M1_A, PIN_M1_B, PIN_M1_ENC_A, PIN_M1_ENC_B);
     } else {
-        Serial.println("WARN  [System]: Motor 1 konnte nicht initialisiert werden.");
+        Log.println("WARN  [System]: Motor 1 konnte nicht initialisiert werden.");
     }
 
     // -----------------------------------------------------------------------
     // Motor 2 (baugleich zu Motor 1, eigene PWM-/Encoder-Pins)
     // Fehler hier sind ebenfalls NICHT fatal.
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Motor 2 (DRV8871 + Encoder, sanfte Anfahrt)...");
+    Log.println("INFO  [System]: Initialisiere Motor 2 (DRV8871 + Encoder, sanfte Anfahrt)...");
     motor2_ = new MotorHAL(PIN_M2_A, PIN_M2_B, 2, /*soft_approach=*/true);
     motor2_ready_ = motor2_->init();
     if (motor2_ready_) {
         motor2_->initEncoder(PIN_M2_ENC_A, PIN_M2_ENC_B);
-        Serial.printf("INFO  [System]: Motor 2 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
+        Log.printf("INFO  [System]: Motor 2 bereit (Treiber Pin %u/%u, Encoder Pin %u/%u).\n",
                       PIN_M2_A, PIN_M2_B, PIN_M2_ENC_A, PIN_M2_ENC_B);
     } else {
-        Serial.println("WARN  [System]: Motor 2 konnte nicht initialisiert werden.");
+        Log.println("WARN  [System]: Motor 2 konnte nicht initialisiert werden.");
     }
 
     // -----------------------------------------------------------------------
@@ -148,15 +177,22 @@ bool System::init(bool after_watchdog_reset) {
     // Schlaegt er fehl, laeuft der Sensor ohne Tara weiter und meldet das per
     // DL_FORCE_TARED an die Bodenstation.
     // -----------------------------------------------------------------------
-    Serial.println("INFO  [System]: Initialisiere Kraftsensor 1 (3x HX711, X/Y/Z)...");
+    bootguard::watchdogFeed();
     force1_ = new ForceHAL(PIN_FORCE1_DOUT, 3, PIN_FORCE1_SCK, FORCE1_TELE_DIV);
-    force1_ready_ = force1_->init();
-    Serial.println("INFO  [System]: Kraftsensor 1 - Nullabgleich laeuft im Hintergrund.");
-
-    Serial.println("INFO  [System]: Initialisiere Kraftsensor 2 (4x HX711, A/B/C/D)...");
     force2_ = new ForceHAL(PIN_FORCE2_DOUT, 4, PIN_FORCE2_SCK, FORCE2_TELE_DIV);
-    force2_ready_ = force2_->init();
-    Serial.println("INFO  [System]: Kraftsensor 2 - Nullabgleich laeuft im Hintergrund.");
+    if (disabled(GUARD_OFF_FORCE)) {
+        Log.println("WARN  [System]: Kraftsensoren fuer diesen Start AUS (Boot-Guard).");
+    } else {
+        Scope guard(Stage::INIT_FORCE);
+        Log.println("INFO  [System]: Initialisiere Kraftsensor 1 (3x HX711, X/Y/Z)...");
+        force1_ready_ = force1_->init();
+        Log.println("INFO  [System]: Kraftsensor 1 - Nullabgleich laeuft im Hintergrund.");
+
+        Log.println("INFO  [System]: Initialisiere Kraftsensor 2 (4x HX711, A/B/C/D)...");
+        force2_ready_ = force2_->init();
+        Log.println("INFO  [System]: Kraftsensor 2 - Nullabgleich laeuft im Hintergrund.");
+    }
+    bootguard::watchdogFeed();
 
     // -----------------------------------------------------------------------
     // Uplink-Telecommand-Empfang (teilt sich Serial4 mit dem Downlink, Pin 16 RX)
@@ -169,27 +205,52 @@ bool System::init(bool after_watchdog_reset) {
     // hier freigegeben: Nach dem Einschalten stehen die Module in INHIBITED
     // (ICD 3.2), freigeben geht nur per ARM_RELEASE in TEST.
     // -----------------------------------------------------------------------
-    Serial.printf("INFO  [System]: Initialisiere Roboterarm-UART (Serial1, Pin %u/%u, %lu Baud)...\n",
+    Log.printf("INFO  [System]: Initialisiere Roboterarm-UART (Serial1, Pin %u/%u, %lu Baud)...\n",
                   PIN_ARM_RX, PIN_ARM_TX, static_cast<unsigned long>(rates::ARM_BAUDRATE));
     arm_ = new ArmLink(Serial1);
-    arm_ready_ = arm_->init(rates::ARM_BAUDRATE);
-    Serial1.addMemoryForRead(serial1_rx_extra, sizeof(serial1_rx_extra));
-    Serial1.addMemoryForWrite(serial1_tx_extra, sizeof(serial1_tx_extra));
+    {
+        // Der Arm wird vom Boot-Guard nie abgeschaltet (siehe boot_guard.hpp).
+        Scope guard(Stage::INIT_ARM);
+        arm_ready_ = arm_->init(rates::ARM_BAUDRATE);
+        Serial1.addMemoryForRead(serial1_rx_extra, sizeof(serial1_rx_extra));
+        Serial1.addMemoryForWrite(serial1_tx_extra, sizeof(serial1_tx_extra));
+    }
+    // Jedes gueltige Frame von/zur RCU auf die SD-Karte (ARM_RAW.csv + Auswertung).
+    // Verworfene Empfangs-Kandidaten nur bis ARM_BAD_TO_SD_PER_S pro Sekunde
+    // (Diagnose) - bei falscher Baudrate waeren es sonst hunderte.
+    arm_->setTap([](void* ctx, ArmTapKind kind, const uint8_t* frame, uint8_t len) {
+        static uint32_t window_ms = 0;
+        static uint8_t  bad_in_window = 0;
+        if (kind == ArmTapKind::RX_BAD_CRC || kind == ArmTapKind::RX_BAD_ID) {
+            const uint32_t now = millis();
+            if (now - window_ms >= 1000) { window_ms = now; bad_in_window = 0; }
+            if (bad_in_window >= ARM_BAD_TO_SD_PER_S) return;
+            bad_in_window++;
+        }
+        static_cast<SdLogger*>(ctx)->pushArm(static_cast<uint8_t>(kind), frame, len);
+    }, &sd_);
 
     // -----------------------------------------------------------------------
     // Kameras (4x RunCam an Serial5, Pin 20 TX / 21 RX, Mux-Wahl 19/22).
     // init() oeffnet nur die UART; ob die Kameras antworten, zeigt SYS/CAMERA.
     // -----------------------------------------------------------------------
-    Serial.printf("INFO  [System]: Initialisiere Kamera-UART (Serial5, Pin %u/%u, Mux %u/%u)...\n",
+    Log.printf("INFO  [System]: Initialisiere Kamera-UART (Serial5, Pin %u/%u, Mux %u/%u)...\n",
                   PIN_CAM_TX, PIN_CAM_RX, PIN_CAM_SEL_A, PIN_CAM_SEL_B);
     cam_ = new CameraHAL(Serial5, PIN_CAM_SEL_A, PIN_CAM_SEL_B);
-    cam_ready_ = cam_->init(rates::CAM_BAUDRATE);
+    if (disabled(GUARD_OFF_CAM)) {
+        Log.println("WARN  [System]: Kameras fuer diesen Start AUS (Boot-Guard).");
+    } else {
+        Scope guard(Stage::INIT_CAM);
+        cam_ready_ = cam_->init(rates::CAM_BAUDRATE);
+    }
+    bootguard::watchdogFeed();
+    bootguard::stage(Stage::INIT_STATE);
 
     // Flug-Trajektorie (im Flash eingebaut) pruefen und Flug-Schalter laden.
     // Das Ergebnis geht mit SYS/ARM_FLIGHT an den Boden (TABLE_OK, CRC-Byte).
     arm_flight_.verifyTable();
     arm_flight_enabled_ = persist_.loadArmFlightEnable();
-    Serial.printf("INFO  [System]: Flug-Schalter Roboterarm: %s.\n",
+    Log.printf("INFO  [System]: Flug-Schalter Roboterarm: %s.\n",
                   arm_flight_enabled_ ? "AN (Trajektorie startet in ROBOT_ARM sofort)"
                                       : "aus (Trajektorie startet erst bei gemessener Schwerelosigkeit)");
 
@@ -198,8 +259,9 @@ bool System::init(bool after_watchdog_reset) {
     // Zustandswechsel aus - die Rohpegel gehen nur mit dem SYS/STATE-Frame an
     // die Bodenstation, damit die Verkabelung am Aufbau geprueft werden kann.
     // -----------------------------------------------------------------------
-    Serial.printf("INFO  [System]: Initialisiere REXUS-Signale (L0 %u / SOE %u / SODS %u)...\n",
+    Log.printf("INFO  [System]: Initialisiere REXUS-Signale (L0 %u / SOE %u / SODS %u)...\n",
                   PIN_L0_T, PIN_SOE_I, PIN_SODS_I);
+    bootguard::stage(Stage::INIT_REXUS);
     rexus_ = new REXUSHAL(PIN_L0_T, PIN_SOE_I, PIN_SODS_I);
     rexus_ready_ = rexus_->init();
 
@@ -216,18 +278,21 @@ bool System::init(bool after_watchdog_reset) {
     const bool timed = StateMachine::isTimed(start);
 
     flight_flags_      = persist_.loadFlightFlags();
+    hdrm_blind_        = persist_.loadHdrmBlind();
     last_checkpoint_s_ = timed ? persist_.loadCheckpoint() : 0;
 
     const uint32_t now = millis();
     const uint32_t elapsed = timed ? last_checkpoint_s_ * 1000UL + now : 0;
     state_machine_.init(start, now, elapsed);
     last_state_ = start;
+    sd_.setState(static_cast<uint8_t>(start));
     persist_.saveState(static_cast<uint8_t>(start));   // z.B. TEST -> PRE_LAUNCH festhalten
     if (start == MissionState::DESCENT) planDescent(now);   // Motoren wieder blockieren
+
     if (!StateMachine::isGround(start)) cameraSafetyStart("Neustart im Flug");
     logStateEvent(start, 0, now);   // Startzustand als erstes Ereignis auf die SD-Karte
 
-    Serial.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s, "
+    Log.printf("INFO  [System]: Zustandsmaschine gestartet in %s (gespeichert: %s, "
                   "Flugzeit %lu ms, HDRM-Flags 0x%02X).\n",
                   StateMachine::toString(start),
                   stored_valid ? StateMachine::toString(static_cast<MissionState>(stored))
@@ -242,9 +307,9 @@ bool System::init(bool after_watchdog_reset) {
                      force1_ready_ && force2_ready_ && rexus_ready_;
 
     if (system_healthy) {
-        Serial.println("INFO  [System]: System erfolgreich initialisiert.\n");
+        Log.println("INFO  [System]: System erfolgreich initialisiert.\n");
     } else {
-        Serial.printf("WARN  [System]: System DEGRADIERT gestartet - IMU:%s Downlink:%s "
+        Log.printf("WARN  [System]: System DEGRADIERT gestartet - IMU:%s Downlink:%s "
                       "Motor1:%s Motor2:%s Kraft1:%s Kraft2:%s REXUS:%s\n\n",
                       imu_ready_      ? "OK" : "FEHLT",
                       downlink_ready_ ? "OK" : "FEHLT",
@@ -254,23 +319,77 @@ bool System::init(bool after_watchdog_reset) {
                       force2_ready_   ? "OK" : "FEHLT",
                       rexus_ready_    ? "OK" : "FEHLT");
     }
+    sd_.infof("Startzustand: %s (gespeichert: %s), Flugzeit %lu ms, HDRM-Flags 0x%02X",
+              StateMachine::toString(start),
+              stored_valid ? StateMachine::toString(static_cast<MissionState>(stored)) : "nichts",
+              static_cast<unsigned long>(elapsed), flight_flags_);
+    sd_.infof("Subsysteme: IMU %s, Downlink %s, Motor1 %s, Motor2 %s, Kraft1 %s, Kraft2 %s, "
+              "REXUS %s, Arm-UART %s, Kameras %s",
+              imu_ready_ ? "OK" : "FEHLT", downlink_ready_ ? "OK" : "FEHLT",
+              motor_ready_ ? "OK" : "FEHLT", motor2_ready_ ? "OK" : "FEHLT",
+              force1_ready_ ? "OK" : "FEHLT", force2_ready_ ? "OK" : "FEHLT",
+              rexus_ready_ ? "OK" : "FEHLT", arm_ready_ ? "OK" : "FEHLT",
+              cam_ready_ ? "OK" : "FEHLT");
+    bootguard::stage(Stage::NONE);
     return true;
 }
 
+void System::logBootGuard() {
+    if (!bootguard::afterWatchdogReset()) return;
+    Log.printf("WARN  [System]: Watchdog-Reset! Haenger in %s, %u Reset(s) in Folge.\n",
+               bootguard::stageName(bootguard::culprit()), bootguard::resetsInRow());
+    if (bootguard::minimalMode()) {
+        Log.printf("WARN  [System]: MINIMALMODUS (>= %u Resets in Folge): SD-Karte, Kameras und "
+                   "Kraftsensoren bleiben aus.\n", bootguard::MINIMAL_MODE_RESETS);
+    }
+    if (bootguard::disabledMask()) {
+        Log.printf("WARN  [System]: Fuer diesen Start aus:%s%s%s%s%s\n",
+                   bootguard::disabled(GUARD_OFF_SD)    ? " SD-Karte" : "",
+                   bootguard::disabled(GUARD_OFF_IMU)   ? " IMU" : "",
+                   bootguard::disabled(GUARD_OFF_FORCE) ? " Kraftsensoren" : "",
+                   bootguard::disabled(GUARD_OFF_CAM)   ? " Kameras" : "",
+                   bootguard::disabled(GUARD_OFF_ARM)   ? " Arm-UART" : "");
+    }
+}
+
+void System::writeSdInfo(bool after_watchdog_reset) {
+    const uint32_t t = rtc_get();
+    const uint32_t sec = t % 86400;
+    sd_.infof("MAGGIE OBC - Start Nr. %lu", static_cast<unsigned long>(persist_.bootCount()));
+    sd_.infof("Firmware-Build: %s %s", __DATE__, __TIME__);
+    sd_.infof("Teensy-Uhr beim Start: Unix %lu, %02lu:%02lu:%02lu (ohne Knopfzelle evtl. falsch)",
+              static_cast<unsigned long>(t), static_cast<unsigned long>(sec / 3600),
+              static_cast<unsigned long>((sec / 60) % 60), static_cast<unsigned long>(sec % 60));
+    sd_.infof("Reset-Grund: %s", after_watchdog_reset ? "WATCHDOG" : "Einschalten / Flashen / Reset-Taste");
+    if (after_watchdog_reset) {
+        sd_.infof("Haenger in: %s, Watchdog-Resets in Folge: %u%s",
+                  bootguard::stageName(bootguard::culprit()), bootguard::resetsInRow(),
+                  bootguard::minimalMode() ? " -> MINIMALMODUS" : "");
+    }
+    sd_.infof("Fuer diesen Start abgeschaltet (Boot-Guard): 0x%02X", bootguard::disabledMask());
+    sd_.infof("Spalten und Einheiten: /MAGGIE/LIESMICH.TXT");
+}
+
 void System::run() {
+    using bootguard::stage;
+    const uint32_t loop_start_us = micros();
     const uint32_t now = millis();
 
     // Eingehende Telecommands verarbeiten (jeden Loop, geringe Latenz)
+    stage(Stage::LOOP_UPLINK);
     handleUplink(now);
 
     // Telemetrie der Arm-RCU einlesen (jeden Loop, damit der UART-Puffer
     // auch nach einer langen SD-Schreiboperation nicht ueberlaeuft)
+    stage(Stage::LOOP_ARM);
     if (arm_) arm_->poll();
 
     // Kameras: Auftraege und reihum Abfrage, blockiert nie.
+    stage(Stage::LOOP_CAM);
     if (cam_ && cam_ready_) cam_->update(now);
 
     // RCU-IMU in die Schwerelosigkeits-Erkennung (Freigabe der Flug-Trajektorie).
+    stage(Stage::LOOP_STATE);
     if (arm_ && arm_ready_) {
         const ArmRcuImu& r = arm_->rcuImu();
         if (r.updated_ms != rcu_imu_seen_ms_) {
@@ -283,6 +402,7 @@ void System::run() {
     // Zustand fortschreiben (Telecommands, REXUS-Signale, Flugzeit) und die
     // Aktionen des Flugablaufs ausfuehren
     handleStateMachine(now);
+    stage(Stage::LOOP_FLIGHT);
     handleFlight(now);
 
     // Trajektorien-Test an einem Gelenk. Laeuft nur in TEST: Beim Verlassen
@@ -300,22 +420,31 @@ void System::run() {
     if (arm_flight_.takeChanged()) sendArmFlightStatus(now);
 
     // Fahrt am Ziel abschalten, Bremsimpuls beenden
+    stage(Stage::LOOP_MOTOR);
     if (motor_)  motor_->update();
     if (motor2_) motor2_->update();
-
-    // Kraftsensor jeden Loop pollen und im Takt der Wandlung senden (10 Hz)
-    handleForce();
 
     // Laufzeitbegrenzung des Motors prüfen
     handleMotorTimeout(now);
 
-    // Telemetrie periodisch (Raten: data_rates.hpp). Jedes Frame geht an SD
-    // und - falls die UART mitkommt - an den Downlink.
+    // Kraftsensor jeden Loop pollen und im Takt der Wandlung senden
+    stage(Stage::LOOP_FORCE);
+    handleForce();
+
+    // Telemetrie periodisch (Raten: data_rates.hpp). Die SD-Karte bekommt
+    // jeden Messwert, der Downlink nur, was die UART schafft.
+    stage(Stage::LOOP_IMU);
     if (now - last_telemetry_ms_ >= rates::IMU_INTERVAL_MS) {
         last_telemetry_ms_ = now;
         handleTelemetry(now);
     }
-    if (now - last_motor_telemetry_ms_ >= rates::MOTOR_INTERVAL_MS) {
+    stage(Stage::LOOP_TELEMETRY);
+    if (now - last_sd_motor_ms_ >= rates::SD_MOTOR_INTERVAL_MS) {
+        last_sd_motor_ms_ = now;
+        logMotorToSd(motor_,  motor_ready_,  1);
+        logMotorToSd(motor2_, motor2_ready_, 2);
+    }
+    if (now - last_motor_telemetry_ms_ >= rates::DL_MOTOR_INTERVAL_MS) {
         last_motor_telemetry_ms_ = now;
         // Reihenfolge jedes Mal tauschen: Der Downlink ist ueberbucht (siehe
         // data_rates.hpp), und das ZWEITE Frame eines Paars findet die
@@ -332,7 +461,17 @@ void System::run() {
         }
     }
 
-    // Zustand + Subsystem-Gesundheit langsamer hinterherschicken (1 Hz)
+    // Stufe 1: Status (Zustand, HDRM, Arm/Kameras/Sensoren) mit 2 Hz,
+    // Diagnose-Frames und SD-Ueberblick mit 1 Hz.
+    if (now - last_status_ms_ >= rates::STATUS_INTERVAL_MS) {
+        last_status_ms_ = now;
+        sendStatusFrame(now);
+    }
+    if (now - last_diag_ms_ >= rates::SYS_INTERVAL_MS / DIAG_SLOTS) {
+        last_diag_ms_ = now;
+        sendDiagFrame(now);
+    }
+    // SYS.csv / CAMERA.csv und Loop-Statistik (1 Hz)
     if (now - last_sys_telemetry_ms_ >= rates::SYS_INTERVAL_MS) {
         last_sys_telemetry_ms_ = now;
         handleSystemTelemetry(now);
@@ -342,8 +481,17 @@ void System::run() {
     handleArmTelemetry(now);
 
     // Flugzeit sichern, dann Bordspeicher: beides nie bei laufendem Motor.
+    stage(Stage::LOOP_CHECKPOINT);
     updateCheckpoint(now);
-    sd_.service(now, !motorsRunning());
+    sd_.service(now, !motorsRunning());   // setzt selbst LOOP_SD / LOOP_SD_FORMAT
+
+    stage(Stage::NONE);
+    bootguard::loopTick(now);
+
+    // Loop-Dauer: Maximum pro SYS-Periode fuer SYS.csv und SYS/BOOT.
+    const uint32_t dt = micros() - loop_start_us;
+    if (dt > loop_max_us_) loop_max_us_ = dt;
+    loop_count_++;
 }
 
 bool System::motorsRunning() const {
@@ -356,12 +504,23 @@ void System::handleTelemetry(uint32_t now_ms) {
     IMUReading reading;
     if (!imu_->read(reading)) return;
 
+    // SD-Karte: jeder Messwert, unabhaengig vom Downlink.
+    SdImu rec;
+    rec.acc[0] = reading.raw_accel_x; rec.acc[1] = reading.raw_accel_y; rec.acc[2] = reading.raw_accel_z;
+    rec.gyro[0] = reading.raw_gyro_x; rec.gyro[1] = reading.raw_gyro_y; rec.gyro[2] = reading.raw_gyro_z;
+    rec.temp  = reading.raw_temp;
+    rec.valid = reading.valid ? 1 : 0;
+    sd_.pushImu(rec);
+
     // Auch ohne Downlink: Die IMU gibt die Flug-Trajektorie frei.
     if (reading.valid) {
         ug_obc_.feed(reading.accel_x / STANDARD_G, reading.accel_y / STANDARD_G,
                      reading.accel_z / STANDARD_G, now_ms);
     }
+    // Downlink: Stufe 3, ausgeduennt (rates::DL_IMU_INTERVAL_MS).
     if (!downlink_ready_ || !downlink_) return;
+    if (now_ms - last_dl_imu_ms_ < rates::DL_IMU_INTERVAL_MS) return;
+    last_dl_imu_ms_ = now_ms;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -370,12 +529,7 @@ void System::handleTelemetry(uint32_t now_ms) {
     downlink_->sendImu(reading, status1, 0);
 }
 
-void System::handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg msg) {
-    if (!downlink_ready_ || !ready || !motor || !downlink_) return;
-
-    const int32_t position = static_cast<int32_t>(motor->getPosition());
-    const int16_t speed    = motor->getSpeed();
-
+uint8_t System::motorStateBits(MotorHAL* motor) {
     // ENCODER_OK unterscheidet am Boden "Motor dreht nicht" von "Encoder ist
     // gar nicht angehaengt" - beides sieht in den Counts gleich aus.
     uint8_t state = 0;
@@ -383,6 +537,26 @@ void System::handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg 
     if (motor->hasEncoder())  state |= DL_MOTOR_STATE_ENCODER_OK;
     if (motor->isTurning())   state |= DL_MOTOR_STATE_TURNING;
     if (motor->turnFailed())  state |= DL_MOTOR_STATE_TURN_FAILED;
+    return state;
+}
+
+void System::logMotorToSd(MotorHAL* motor, bool ready, uint8_t number) {
+    if (!ready || !motor) return;
+    SdMotor rec;
+    rec.motor    = number;
+    rec.state    = motorStateBits(motor);
+    rec.pwm      = motor->getSpeed();
+    rec.position = static_cast<int32_t>(motor->getPosition());
+    sd_.pushMotor(rec);
+}
+
+void System::handleMotorTelemetry(MotorHAL* motor, bool ready, DownlinkMotorMsg msg) {
+    if (!downlink_ready_ || !ready || !motor || !downlink_) return;
+
+    const int32_t position = static_cast<int32_t>(motor->getPosition());
+    const int16_t speed    = motor->getSpeed();
+
+    const uint8_t state = motorStateBits(motor);
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -395,7 +569,7 @@ void System::logForceSensor(ForceHAL* hal, const char* label,
     if (!hal) return;
 
     if (!hal->tared()) {
-        Serial.printf("WARN  [System]: %s antwortet nicht - kein Nullabgleich. "
+        Log.printf("WARN  [System]: %s antwortet nicht - kein Nullabgleich. "
                       "Verkabelung der Datenpins und der Taktleitung %u pruefen.\n",
                       label, sck);
         return;
@@ -404,11 +578,11 @@ void System::logForceSensor(ForceHAL* hal, const char* label,
     // Die Nullpunkte gehoeren ins Protokoll: Sie sind der Bezug jeder spaeteren
     // Messung, und ein voellig abweichender Wert zwischen zwei Starts ist der
     // erste Hinweis auf eine belastete Zelle beim Booten.
-    Serial.printf("INFO  [System]: %s bereit (Takt %u), Nullpunkte:", label, sck);
+    Log.printf("INFO  [System]: %s bereit (Takt %u), Nullpunkte:", label, sck);
     for (uint8_t i = 0; i < count; i++) {
-        Serial.printf(" Pin%u=%ld", pins[i], static_cast<long>(hal->offset(i)));
+        Log.printf(" Pin%u=%ld", pins[i], static_cast<long>(hal->offset(i)));
     }
-    Serial.println();
+    Log.println();
 }
 
 void System::handleForce() {
@@ -455,8 +629,25 @@ void System::handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
         if (now - state.last_tx_ms < FORCE_STALE_TX_INTERVAL_MS) return;
     }
 
-    if (!downlink_ready_ || !downlink_) return;
     state.last_tx_ms = now;
+
+    // SD-Karte: jede Wandlung mit vollen 24-Bit-Counts (Downlink: int16).
+    SdForce rec{};
+    rec.sensor = msg == DownlinkForceMsg::TARGET2 ? 2 : 1;
+    rec.count  = state.last.count > 4 ? 4 : state.last.count;
+    rec.flags  = (hal->tared() ? SD_FORCE_TARED : 0) | (hal->stalled() ? SD_FORCE_STALE : 0) |
+                 (fresh ? SD_FORCE_FRESH : 0);
+    for (uint8_t i = 0; i < rec.count; i++) {
+        rec.counts[i] = state.last.counts[i];
+        rec.raw[i]    = state.last.raw[i];
+    }
+    sd_.pushForce(rec);
+
+    // Downlink: Stufe 3, frische Werte ausgeduennt (rates::DL_FORCE_INTERVAL_MS).
+    // STALE-Frames (Sensor haengt) gehen immer - sie kommen ohnehin nur 1x/s.
+    if (!downlink_ready_ || !downlink_) return;
+    if (fresh && now - state.last_dl_ms < rates::DL_FORCE_INTERVAL_MS) return;
+    state.last_dl_ms = now;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
@@ -466,17 +657,17 @@ void System::handleForceSensor(ForceHAL* hal, bool ready, DownlinkForceMsg msg,
 
 void System::tareForceSensor(ForceHAL* hal, bool ready, const char* label) {
     if (!ready || !hal) {
-        Serial.printf("WARN  [System]: FORCE_TARE fuer %s - Sensor nicht da, ignoriert.\n",
+        Log.printf("WARN  [System]: FORCE_TARE fuer %s - Sensor nicht da, ignoriert.\n",
                       label);
         return;
     }
 
-    Serial.printf("INFO  [System]: TC FORCE_TARE - %s wird im Hintergrund genullt "
+    Log.printf("INFO  [System]: TC FORCE_TARE - %s wird im Hintergrund genullt "
                   "(Zellen muessen unbelastet sein)\n", label);
     // Kehrt sofort zurueck - der Abgleich laeuft ueber die naechsten Loops, das
     // Ergebnis wird in handleForceSensor() protokolliert.
     if (!hal->startTare()) {
-        Serial.printf("WARN  [System]: FORCE_TARE fuer %s nicht gestartet.\n", label);
+        Log.printf("WARN  [System]: FORCE_TARE fuer %s nicht gestartet.\n", label);
     }
 }
 
@@ -492,31 +683,180 @@ uint8_t System::subsystemBits() const {
 }
 
 void System::handleSystemTelemetry(uint32_t now_ms) {
+    const uint8_t rexus_bits = (rexus_ready_ && rexus_) ? rexus_->rawBits() : 0;
+
+    // Loop-Statistik dieser Periode (Maximum und Durchlaeufe pro Sekunde).
+    const uint32_t period_ms = now_ms - loop_stats_since_ms_;
+    const uint32_t loop_max_us = loop_max_us_;
+    const uint32_t loops_per_s = period_ms ? static_cast<uint32_t>(
+        static_cast<uint64_t>(loop_count_) * 1000 / period_ms) : loop_count_;
+    loop_max_us_ = 0;
+    loop_count_ = 0;
+    loop_stats_since_ms_ = now_ms;
+
+    logSystemToSd(now_ms, rexus_bits, loop_max_us, loops_per_s);
+    reportArmLink(now_ms);
+
+    last_loop_max_us_ = loop_max_us;
+}
+
+void System::reportArmLink(uint32_t now_ms) {
+    if (!arm_ || !arm_ready_ || now_ms - last_arm_report_ms_ < ARM_LINK_REPORT_MS) return;
+    last_arm_report_ms_ = now_ms;
+    const uint32_t ok  = arm_->framesOkTotal() - arm_report_ok_;
+    const uint32_t crc = arm_->crcErrors() - arm_report_crc_;
+    const uint32_t id  = arm_->unknownIds() - arm_report_id_;
+    arm_report_ok_  = arm_->framesOkTotal();
+    arm_report_crc_ = arm_->crcErrors();
+    arm_report_id_  = arm_->unknownIds();
+    if (ok == 0 && crc == 0 && id == 0) return;   // RCU stumm - zeigt SYS/ARM_LINK
+    Log.printf("%s [Arm]: letzte %lu s: %lu Frames ok, %lu CRC-Fehler, %lu unbekannte ID "
+               "(Rohbytes: ARM_RAW.csv)\n", (crc + id > ok / 10) ? "WARN " : "INFO ",
+               static_cast<unsigned long>(ARM_LINK_REPORT_MS / 1000), static_cast<unsigned long>(ok),
+               static_cast<unsigned long>(crc), static_cast<unsigned long>(id));
+}
+
+void System::sendDiagFrame(uint32_t now_ms) {
+    // Diagnose-Frames (Stufe 1) reihum statt alle auf einmal: Ein 1-s-Schub
+    // von ~200 Byte wuerde die Stufe 3 (Sensordaten) jedes Mal fuer ~50 ms
+    // aussperren. So geht alle DIAG_SLOT_MS hoechstens ein Paar raus, und jedes
+    // Frame trotzdem genau 1x pro Sekunde. SYS/STATE kommt eigens mit 2 Hz
+    // aus sendStatusFrame().
+    if (!downlink_ready_ || !downlink_) return;
+    const uint8_t slot = diag_slot_;
+    diag_slot_ = static_cast<uint8_t>((diag_slot_ + 1) % DIAG_SLOTS);
+
+    switch (slot) {
+        case 0:
+            // Uplink-Empfangsstatistik: zeigt am Boden, ob ein Telecommand die
+            // UART ueberhaupt erreicht.
+            if (uplink_) {
+                downlink_->sendUplinkStats(uplink_->rxBytes(), uplink_->framesOk(),
+                                           uplink_->framesBad(), uplink_->lastOpcode());
+                downlink_->sendUplinkRaw(uplink_->burstBytes(), uplink_->burstLen());
+            }
+            return;
+        case 1:
+            // Arm-Link-Statistik: zeigt am Boden, ob die RCU ueberhaupt antwortet.
+            if (arm_ && arm_ready_) downlink_->sendArmLink(*arm_, now_ms);
+            return;
+        case 2: sendArmTrajStatus(); return;
+        case 3: sendArmFlightStatus(now_ms); return;
+        case 4: sendCameraStatus(now_ms); return;
+        case 5:
+            // Bordspeicher: Ob die Karte schreibt, muss der Boden sehen.
+            downlink_->sendSd(static_cast<uint8_t>(sd_.status()), static_cast<uint8_t>(sd_.failReason()),
+                              sd_.writtenKb(), sd_.dropped(), sd_.fillPercent());
+            return;
+        case 6:
+            // Start-Diagnose: Watchdog-Resets, abgeschaltete Subsysteme.
+            downlink_->sendBoot(static_cast<uint16_t>(persist_.bootCount()), bootguard::resetsInRow(),
+                                static_cast<uint8_t>(bootguard::culprit()), bootguard::disabledMask(),
+                                bootguard::minimalMode(), last_loop_max_us_,
+                                bootguard::afterWatchdogReset());
+            return;
+        default:
+            return;   // freier Slot
+    }
+}
+
+void System::sendStatusFrame(uint32_t now_ms) {
+    // Stufe 1 - STATUS: alles, was am Boden "laeuft es?" beantwortet, in EINEM
+    // Frame mit 2 Hz und sofort bei jedem Zustandswechsel.
     if (!downlink_ready_ || !downlink_) return;
 
     uint8_t status1 = 0;
     if (system_healthy) status1 |= DL_STATUS1_SYSTEM_HEALTHY;
 
-    const uint8_t rexus_bits = (rexus_ready_ && rexus_) ? rexus_->rawBits() : 0;
-
-    downlink_->sendSystem(static_cast<uint8_t>(state_machine_.getState()),
-                          subsystemBits(),
-                          now_ms - startup_time,
-                          status1, 0, rexus_bits);
-
-    // Uplink-Empfangsstatistik hinterherschicken: zeigt am Boden, ob ein
-    // Telecommand die UART ueberhaupt erreicht.
-    if (uplink_) {
-        downlink_->sendUplinkStats(uplink_->rxBytes(), uplink_->framesOk(),
-                                   uplink_->framesBad(), uplink_->lastOpcode());
-        downlink_->sendUplinkRaw(uplink_->burstBytes(), uplink_->burstLen());
+    uint8_t live = 0;
+    if (arm_ && arm_ready_ && arm_->linkAlive(now_ms))  live |= DL_LIVE_ARM_LINK;
+    if (sd_.status() == SdLogStatus::ACTIVE)           live |= DL_LIVE_SD;
+    if (arm_flight_enabled_)                           live |= DL_LIVE_FLIGHT_SW;
+    if (bootguard::minimalMode())                      live |= DL_LIVE_MINIMAL;
+    if (cam_ && cam_ready_) {
+        for (uint8_t c = 0; c < CAM_COUNT; ++c) {
+            if (cam_->alive(c, now_ms)) live |= static_cast<uint8_t>(1u << (DL_LIVE_CAM_SHIFT + c));
+        }
     }
 
-    // Arm-Link-Statistik: zeigt am Boden, ob die RCU ueberhaupt antwortet.
-    if (arm_ && arm_ready_) downlink_->sendArmLink(*arm_, now_ms);
-    sendArmTrajStatus();
-    sendArmFlightStatus(now_ms);
-    sendCameraStatus(now_ms);
+    uint8_t flight = 0;
+    if (flight_flags_ & FLIGHT_HDRM_OPENED) flight |= DL_FLIGHT_HDRM_OPENING;
+    if (hdrmsOpenDone())                    flight |= DL_FLIGHT_HDRM_OPEN;
+    if (flight_flags_ & FLIGHT_HDRM_CLOSED) flight |= DL_FLIGHT_HDRM_CLOSING;
+    if (flight_flags_ & FLIGHT_ARM_STARTED) flight |= DL_FLIGHT_ARM_STARTED;
+    if (flight_flags_ & FLIGHT_ARM_DONE)    flight |= DL_FLIGHT_ARM_DONE;
+    if (arm_flight_.active())               flight |= DL_FLIGHT_ARM_MOVING;
+    if (hdrm_blind_)                        flight |= DL_FLIGHT_HDRM_BLIND;
+
+    const uint8_t rexus_bits = (rexus_ready_ && rexus_) ? rexus_->rawBits() : 0;
+    downlink_->sendSystem(static_cast<uint8_t>(state_machine_.getState()), subsystemBits(),
+                          now_ms - startup_time, status1, live, rexus_bits, flight);
+}
+
+void System::logSystemToSd(uint32_t now_ms, uint8_t rexus_bits, uint32_t loop_max_us,
+                           uint32_t loops_per_s) {
+    SdSys r{};
+    r.rtc       = rtc_get();
+    r.subsys    = subsystemBits();
+    r.healthy   = system_healthy ? 1 : 0;
+    r.rexus_raw = rexus_bits;
+    if (uplink_) {
+        r.uplink_rx      = uplink_->rxBytes();
+        r.uplink_ok      = uplink_->framesOk();
+        r.uplink_bad     = uplink_->framesBad();
+        r.uplink_last_op = uplink_->lastOpcode();
+    }
+    if (arm_ && arm_ready_) {
+        r.arm_ok          = arm_->framesOkTotal();
+        r.arm_crc_errors  = arm_->crcErrors();
+        r.arm_unknown_ids = arm_->unknownIds();
+        r.arm_alive      = arm_->linkAlive(now_ms) ? 1 : 0;
+        r.arm_freefall   = arm_->freefallCount();
+        r.arm_last_msg   = arm_->lastMsg();
+        r.arm_last_node  = arm_->lastNode();
+        r.arm_tx_dropped = arm_->txDropped();
+    }
+    r.traj_phase    = static_cast<uint8_t>(arm_traj_.phase());
+    r.flight_phase  = static_cast<uint8_t>(arm_flight_.phase());
+    r.flight_flags  = armFlightFlags(now_ms);
+    r.flight_switch = arm_flight_enabled_ ? 1 : 0;
+    if (cam_ && cam_ready_) {
+        for (uint8_t c = 0; c < CAM_COUNT; ++c) {
+            if (cam_->alive(c, now_ms)) r.cams_alive++;
+            const CameraStatus& cs = cam_->status(c);
+            SdCam rec;
+            rec.cam           = static_cast<uint8_t>(c + 1);
+            rec.flags         = cameraFlags(c, now_ms);
+            const uint32_t a  = cs.answered_ever ? (now_ms - cs.last_answer_ms) / 1000 : 255;
+            rec.age_s         = a > 255 ? 255 : static_cast<uint8_t>(a);
+            rec.protocol      = cs.protocol;
+            rec.features      = cs.features;
+            rec.probes_failed = cs.probes_failed;
+            sd_.pushCam(rec);
+        }
+    }
+    if (downlink_) {
+        r.dl_dropped_status = downlink_->uartDropped(DownlinkPrio::STATUS);
+        r.dl_dropped_motion = downlink_->uartDropped(DownlinkPrio::MOTION);
+        r.dl_dropped_bulk   = downlink_->uartDropped(DownlinkPrio::BULK);
+    }
+    r.loop_max_us = loop_max_us;
+    r.loops       = loops_per_s;
+    sd_.pushSys(r);
+}
+
+uint8_t System::cameraFlags(uint8_t c, uint32_t now_ms) const {
+    const CameraStatus& s = cam_->status(c);
+    uint8_t f = 0;
+    if (cam_->alive(c, now_ms))                    f |= DL_CAM_ALIVE;
+    if (s.answered_ever)                           f |= DL_CAM_ANSWERED;
+    if (s.features & CAM_FEATURE_START_RECORDING)  f |= DL_CAM_FEAT_START;
+    if (s.features & CAM_FEATURE_STOP_RECORDING)   f |= DL_CAM_FEAT_STOP;
+    if (s.last_cmd == CamAction::START)            f |= DL_CAM_SENT_START;
+    if (s.last_cmd == CamAction::STOP)             f |= DL_CAM_SENT_STOP;
+    if (s.rx_any)                                  f |= DL_CAM_RX_ANY;
+    if (s.rx_garbage)                              f |= DL_CAM_RX_GARBAGE;
+    return f;
 }
 
 void System::sendCameraStatus(uint32_t now_ms) {
@@ -525,16 +865,7 @@ void System::sendCameraStatus(uint32_t now_ms) {
     uint8_t age[CAM_COUNT];
     for (uint8_t c = 0; c < CAM_COUNT; ++c) {
         const CameraStatus& s = cam_->status(c);
-        uint8_t f = 0;
-        if (cam_->alive(c, now_ms))                           f |= DL_CAM_ALIVE;
-        if (s.answered_ever)                                  f |= DL_CAM_ANSWERED;
-        if (s.features & CAM_FEATURE_START_RECORDING)         f |= DL_CAM_FEAT_START;
-        if (s.features & CAM_FEATURE_STOP_RECORDING)          f |= DL_CAM_FEAT_STOP;
-        if (s.last_cmd == CamAction::START)                   f |= DL_CAM_SENT_START;
-        if (s.last_cmd == CamAction::STOP)                    f |= DL_CAM_SENT_STOP;
-        if (s.rx_any)                                         f |= DL_CAM_RX_ANY;
-        if (s.rx_garbage)                                     f |= DL_CAM_RX_GARBAGE;
-        flags[c] = f;
+        flags[c] = cameraFlags(c, now_ms);
         const uint32_t a = s.answered_ever ? (now_ms - s.last_answer_ms) / 1000 : 255;
         age[c] = a > 255 ? 255 : static_cast<uint8_t>(a);
     }
@@ -549,7 +880,7 @@ void System::sendCameraStatus(uint32_t now_ms) {
 
 void System::cameraSafetyStart(const char* why) {
     if (!CAM_SAFETY_START || !cam_ || !cam_ready_) return;
-    Serial.printf("INFO  [System]: Kameras: START_RECORDING an alle (%s).\n", why);
+    Log.printf("INFO  [System]: Kameras: START_RECORDING an alle (%s).\n", why);
     cam_->requestAll(CamAction::START);
 }
 
@@ -570,11 +901,15 @@ void System::handleArmTelemetry(uint32_t now_ms) {
 
     // Nur Gelenke mit NEUEM Wert senden: Antwortet die RCU nicht, faellt die
     // Kurve am Boden ab, statt mit dem letzten Wert scheinbar weiterzulaufen.
-    if (now_ms - last_arm_joint_ms_ >= rates::ARM_JOINT_INTERVAL_MS) {
+    // Reihum ein Gelenk alle ARM_JOINT_INTERVAL_MS / ARM_MAX_JOINTS - jedes
+    // also mit 5 Hz, aber nie alle auf einmal (ein Schub von 8 Frames sperrte
+    // die Stufe 3 jedes Mal aus, siehe tools/downlink_sim).
+    if (now_ms - last_arm_joint_ms_ >= rates::ARM_JOINT_INTERVAL_MS / ARM_MAX_JOINTS) {
         last_arm_joint_ms_ = now_ms;
-        for (uint8_t node = 1; node <= ARM_MAX_JOINTS; node++) {
-            ArmJoint* j = arm_->joint(node);
-            if (!j->state_new) continue;
+        const uint8_t node = arm_joint_next_;
+        arm_joint_next_ = static_cast<uint8_t>(arm_joint_next_ % ARM_MAX_JOINTS + 1);
+        ArmJoint* j = arm_->joint(node);
+        if (j->state_new) {
             j->state_new = false;
             downlink_->sendArmJoint(node, *j);
         }
@@ -589,18 +924,21 @@ void System::handleArmTelemetry(uint32_t now_ms) {
         }
     }
 
-    if (now_ms - last_arm_power_ms_ >= rates::ARM_POWER_INTERVAL_MS) {
+    // Spannung + Temperatur: ein Frame nach dem anderen (Gelenk 1 Spannung,
+    // Gelenk 1 Temperatur, Gelenk 2 ...), jedes 1x pro ARM_POWER_INTERVAL_MS -
+    // als Schub (bis 16 Frames) liefe die Stufe-3-Warteschlange sofort ueber.
+    if (now_ms - last_arm_power_ms_ >= rates::ARM_POWER_INTERVAL_MS / (2 * ARM_MAX_JOINTS)) {
         last_arm_power_ms_ = now_ms;
-        for (uint8_t node = 1; node <= ARM_MAX_JOINTS; node++) {
-            ArmJoint* j = arm_->joint(node);
-            if (j->voltage_new) {
-                j->voltage_new = false;
-                downlink_->sendArmVoltage(node, *j);
-            }
-            if (j->temp_new) {
-                j->temp_new = false;
-                downlink_->sendArmTemp(node, *j);
-            }
+        const uint8_t step = arm_power_step_;
+        arm_power_step_ = static_cast<uint8_t>((arm_power_step_ + 1) % (2 * ARM_MAX_JOINTS));
+        const uint8_t node = static_cast<uint8_t>(step / 2 + 1);
+        ArmJoint* j = arm_->joint(node);
+        if ((step & 1) == 0 && j->voltage_new) {
+            j->voltage_new = false;
+            downlink_->sendArmVoltage(node, *j);
+        } else if ((step & 1) == 1 && j->temp_new) {
+            j->temp_new = false;
+            downlink_->sendArmTemp(node, *j);
         }
     }
 }
@@ -630,13 +968,13 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
         return false;
     }
     if (!arm_ || !arm_ready_) {
-        Serial.println("WARN  [System]: Arm-Telecommand ignoriert - Arm-UART nicht bereit.");
+        Log.println("WARN  [System]: Arm-Telecommand ignoriert - Arm-UART nicht bereit.");
         return true;
     }
     // Waehrend der Trajektorie keine weiteren Fahrbefehle - sie wuerden das
     // Ziel des Players ueberschreiben. Abbrechen geht mit ARM_STOP/ARM_INHIBIT.
     if (arm_traj_.active()) {
-        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X ignoriert - Trajektorie laeuft "
+        Log.printf("WARN  [System]: Arm-Telecommand 0x%02X ignoriert - Trajektorie laeuft "
                       "(abbrechen: ARM_STOP).\n", cmd.opcode);
         return true;
     }
@@ -644,21 +982,21 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
     // Freigeben und Fahren nur fuer EIN bestimmtes Gelenk, nie "alle".
     const uint8_t node = armNode(cmd);
     if (node < 1 || node > ARM_MAX_JOINTS) {
-        Serial.printf("WARN  [System]: Arm-Telecommand 0x%02X mit ungueltigem Gelenk %u "
+        Log.printf("WARN  [System]: Arm-Telecommand 0x%02X mit ungueltigem Gelenk %u "
                       "(1..%u) - ignoriert.\n", cmd.opcode, node, ARM_MAX_JOINTS);
         return true;
     }
 
     switch (op) {
         case UplinkOpcode::ARM_RELEASE:
-            Serial.printf("INFO  [System]: TC ARM_RELEASE Gelenk %u\n", node);
+            Log.printf("INFO  [System]: TC ARM_RELEASE Gelenk %u\n", node);
             arm_->sendCommand(node, ArmMsg::RELEASE);
             return true;
 
         case UplinkOpcode::ARM_JOG: {
             const int8_t deg = static_cast<int8_t>(armValue(cmd));
             if (deg == 0 || deg > ARM_JOG_MAX_DEG || deg < -ARM_JOG_MAX_DEG) {
-                Serial.printf("WARN  [System]: ARM_JOG Gelenk %u mit %d Grad ausserhalb "
+                Log.printf("WARN  [System]: ARM_JOG Gelenk %u mit %d Grad ausserhalb "
                               "+-1..%d - ignoriert.\n", node, deg, ARM_JOG_MAX_DEG);
                 return true;
             }
@@ -669,10 +1007,10 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
             // sie also immer in dieser Reihenfolge. Passt RELEASE nicht mehr in
             // den Puffer, unterbleibt auch der Jog (sonst faehrt er ins Leere).
             // Lockert keine Sperre: ARM_JOG kommt hier nur in TEST an.
-            Serial.printf("INFO  [System]: TC ARM_JOG Gelenk %u um %d Grad (%ld urad), "
+            Log.printf("INFO  [System]: TC ARM_JOG Gelenk %u um %d Grad (%ld urad), "
                           "vorher RELEASE\n", node, deg, static_cast<long>(urad));
             if (!arm_->sendCommand(node, ArmMsg::RELEASE)) {
-                Serial.printf("WARN  [System]: ARM_JOG Gelenk %u - RELEASE passte nicht in "
+                Log.printf("WARN  [System]: ARM_JOG Gelenk %u - RELEASE passte nicht in "
                               "den TX-Puffer, Jog nicht gesendet.\n", node);
                 return true;
             }
@@ -683,7 +1021,7 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
         case UplinkOpcode::ARM_SET_VELOCITY: {
             const uint8_t deg_s = armValue(cmd);
             if (deg_s == 0) {
-                Serial.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit 0 Grad/s - ignoriert.\n",
+                Log.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit 0 Grad/s - ignoriert.\n",
                               node);
                 return true;
             }
@@ -691,12 +1029,12 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
             // Vorgabe Team: hoechstens 6 Grad/s und 2 Grad/s^2 (RCU-Standard) -
             // dieselben Grenzen wie der Trajektorientest.
             if (deg_s > ARM_JOG_MAX_VEL_DEG_S) {
-                Serial.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit %u Grad/s ueber %u - ignoriert.\n",
+                Log.printf("WARN  [System]: ARM_SET_VELOCITY Gelenk %u mit %u Grad/s ueber %u - ignoriert.\n",
                               node, deg_s, ARM_JOG_MAX_VEL_DEG_S);
                 return true;
             }
             const uint8_t accel = deg_s < ARM_JOG_MAX_ACCEL_DEG_S2 ? deg_s : ARM_JOG_MAX_ACCEL_DEG_S2;
-            Serial.printf("INFO  [System]: TC ARM_SET_VELOCITY Gelenk %u auf %u Grad/s, %u Grad/s^2\n",
+            Log.printf("INFO  [System]: TC ARM_SET_VELOCITY Gelenk %u auf %u Grad/s, %u Grad/s^2\n",
                           node, deg_s, accel);
             arm_->sendSetVelocity(node, deg_s, accel);
             return true;
@@ -708,14 +1046,14 @@ bool System::handleArmCommand(const UplinkCommand& cmd) {
             // Hoechstens zwei Gelenke - Freigabe des Teams, CLAUDE.md Regel 2.
             const uint8_t node2 = armValue(cmd);
             if (node2 > ARM_MAX_JOINTS) {
-                Serial.printf("WARN  [System]: ARM_TRAJ_TEST mit ungueltigem 2. Gelenk %u - ignoriert.\n",
+                Log.printf("WARN  [System]: ARM_TRAJ_TEST mit ungueltigem 2. Gelenk %u - ignoriert.\n",
                               node2);
                 return true;
             }
             const uint8_t nodes[2] = { node, node2 };
             const uint8_t count = node2 ? 2 : 1;
-            Serial.printf("INFO  [System]: TC ARM_TRAJ_TEST Gelenk %u%s", node, node2 ? " + " : "\n");
-            if (node2) Serial.printf("%u\n", node2);
+            Log.printf("INFO  [System]: TC ARM_TRAJ_TEST Gelenk %u%s", node, node2 ? " + " : "\n");
+            if (node2) Log.printf("%u\n", node2);
             arm_traj_.start(*arm_, nodes, count, millis());
             return true;
         }
@@ -773,6 +1111,7 @@ void System::commitStateChange(uint32_t now_ms) {
     const MissionState previous = last_state_;
     if (current == previous) return;
 
+    sd_.setState(static_cast<uint8_t>(current));
     onStateChanged(previous, current, now_ms);
     last_state_ = current;
     reportChange(previous, now_ms);
@@ -783,17 +1122,17 @@ void System::reportChange(MissionState previous, uint32_t now_ms) {
     // den Downlink - nicht erst zum naechsten 1-s-Takt. So sieht der Boden
     // z.B. LO so schnell wie moeglich.
     logStateEvent(previous, last_event_signals_, now_ms);
-    last_sys_telemetry_ms_ = now_ms;
-    handleSystemTelemetry(now_ms);
+    last_status_ms_ = now_ms;
+    sendStatusFrame(now_ms);
 }
 
 void System::logStateEvent(MissionState previous, uint8_t prev_signals, uint32_t now_ms) {
     const uint8_t signals = currentSignalBits();
     last_event_signals_ = signals;
-    if (!downlink_) return;
-    downlink_->logEvent(static_cast<uint8_t>(state_machine_.getState()),
-                        static_cast<uint8_t>(previous),
-                        eventSignals(signals), eventSignals(prev_signals), now_ms);
+    (void)now_ms;   // Zeitstempel setzt der SdLogger
+    sd_.pushStateEvent(static_cast<uint8_t>(state_machine_.getState()),
+                       static_cast<uint8_t>(previous),
+                       eventSignals(signals), eventSignals(prev_signals));
 }
 
 uint8_t System::eventSignals(uint8_t flight_bits) {
@@ -813,18 +1152,18 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
 
     // 1. Motoren - ZUERST, damit die Flash-Schreibzugriffe unten keinen
     //    laufenden Motor treffen (sie sperren die Encoder-Interrupts).
-    //    Noch geplante HDRM-Fahrten verfallen (z.B. STATE_RESET mitten im
-    //    Ablauf). Stopp bei: TEST verlassen, Flugbeginn und jeder
-    //    Rueckkehr nach PRE_LAUNCH - off() loest dabei auch die Sperre aus
-    //    DESCENT, die Motoren laufen danach frei aus.
-    hdrm_move_[0].pending = false;
-    hdrm_move_[1].pending = false;
+    //    Laufende HDRM-Ablaeufe enden (z.B. STATE_RESET mitten im Ablauf).
+    //    Stopp bei: TEST verlassen, Flugbeginn und jeder Rueckkehr nach
+    //    PRE_LAUNCH - off() loest dabei auch die Sperre aus DESCENT, die
+    //    Motoren laufen danach frei aus. Innerhalb des Flugs (EXPERIMENT ->
+    //    ROBOT_ARM -> DESCENT) laufen die HDRM-Ablaeufe weiter.
     if (previous == MissionState::TEST || current == MissionState::PRE_LAUNCH ||
         flight_begins) {
+        cancelHdrms();
         if (motor_  && motor_ready_)  motor_->off();
         if (motor2_ && motor2_ready_) motor2_->off();
         stopArm();
-        Serial.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
+        Log.printf("INFO  [System]: Aktoren gestoppt (Zustand %s).\n",
                       StateMachine::toString(current));
     }
 
@@ -834,12 +1173,16 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
     if (flight_begins) {
         flight_flags_ = 0;                       // neuer Flug: keine HDRM-Fahrt bisher
         persist_.saveFlightFlags(flight_flags_);
+        hdrm_blind_ = 0;
+        persist_.saveHdrmBlind(0);
     }
     if (current == MissionState::PRE_LAUNCH) {
         // Zurueck am Boden. Was jetzt noch anliegt, muss erst abfallen, bevor
         // es wieder einen Flug startet (siehe handleStateMachine).
         flight_flags_ = currentSignalBits();
         persist_.saveFlightFlags(flight_flags_);
+        hdrm_blind_ = 0;
+        persist_.saveHdrmBlind(0);
     }
     if (flight_begins || current == MissionState::PRE_LAUNCH ||
         current == MissionState::ASCENT || current == MissionState::EXPERIMENT) {
@@ -853,7 +1196,7 @@ void System::onStateChanged(MissionState previous, MissionState current, uint32_
     }
     if (current == MissionState::DESCENT) {
         if (arm_flight_.active()) {
-            Serial.printf("WARN  [System]: DESCENT, aber die Flug-Trajektorie laeuft noch (Schritt %u) - "
+            Log.printf("WARN  [System]: DESCENT, aber die Flug-Trajektorie laeuft noch (Schritt %u) - "
                           "sie faehrt weiter bis in die Verstaupose, die HDRMs schliessen trotzdem.\n",
                           arm_flight_.step());
         }
@@ -881,59 +1224,246 @@ void System::handleFlight(uint32_t now_ms) {
     const MissionState state = state_machine_.getState();
     const uint32_t t = state_machine_.elapsed(now_ms);
 
-    // HDRMs oeffnen. Die Fahrt wird VOR dem Start im EEPROM vermerkt (die
-    // Motoren stehen dann noch) und laeuft hoechstens einmal pro Flug - auch
-    // wenn ein Neustart sie unterbricht. Ein zweiter Versuch aus unbekannter
-    // Position koennte das HDRM gegen den Anschlag fahren.
+    // HDRMs oeffnen. Der Start wird VOR der ersten Fahrt im EEPROM vermerkt
+    // (die Motoren stehen dann noch). Danach versucht updateHdrm() es so oft,
+    // bis der Encoder das Ziel meldet - mit Wackeln im Getriebespiel nach
+    // jedem Fehlversuch. Erst wenn beide nachweislich offen sind
+    // (FLIGHT_HDRM_OPEN_OK), geht es nach ROBOT_ARM.
+    // Nach einem Neustart MITTEN im Oeffnen ist die Lage unbekannt (Encoder
+    // zaehlt ab 0) - dann wird ab der aktuellen Position weiter geoeffnet und
+    // nach HDRM_BLIND_MAX_ATTEMPTS als offen gewertet (siehe unten).
     if (state == MissionState::EXPERIMENT && t >= timeline::HDRM_OPEN_AT_MS &&
         !(flight_flags_ & FLIGHT_HDRM_OPENED) && !motorsRunning()) {
         flight_flags_ |= FLIGHT_HDRM_OPENED;
         persist_.saveFlightFlags(flight_flags_);
-        Serial.printf("INFO  [System]: t0+%lu ms - HDRMs oeffnen.\n",
+        Log.printf("INFO  [System]: t0+%lu ms - HDRMs oeffnen.\n",
                       static_cast<unsigned long>(t));
-        scheduleHdrmMoves(now_ms, timeline::HDRM_OPEN_DEG);
+        startHdrms(now_ms, /*open=*/true);
     }
 
-    // Geplante Fahrten starten, sobald faellig. Gleicher Weg wie MOTOR_TURN
-    // im Testmodus (execMotorAction).
-    MotorHAL* const motors[2] = { motor_, motor2_ };
-    const bool ready[2]       = { motor_ready_, motor2_ready_ };
-    uint32_t* const on_since[2] = { &motor_on_since_ms_, &motor2_on_since_ms_ };
-    const char* const labels[2] = { "HDRM1", "HDRM2" };
-    for (uint8_t i = 0; i < 2; i++) {
-        HdrmMove& move = hdrm_move_[i];
-        if (!move.pending || static_cast<int32_t>(now_ms - move.due_ms) < 0) continue;
-        move.pending = false;
-        execMotorAction(motors[i], ready[i], labels[i], MotorAction::TURN,
-                        move.degrees, *on_since[i]);
+    // Neustart MITTEN im Oeffnen: Lage unbekannt - trotzdem weiter oeffnen
+    // (Nutzer: "Hauptsache es geht auf und der Arm startet").
+    if ((state == MissionState::EXPERIMENT || state == MissionState::ROBOT_ARM) &&
+        (flight_flags_ & FLIGHT_HDRM_OPENED) && !(flight_flags_ & FLIGHT_HDRM_OPEN_OK) &&
+        hdrm_[0].phase == HdrmCtl::Phase::IDLE && hdrm_[1].phase == HdrmCtl::Phase::IDLE &&
+        !motorsRunning()) {
+        Log.println("WARN  [System]: Neustart mitten im HDRM-Oeffnen - oeffne erneut ab der aktuellen Position.");
+        startHdrms(now_ms, /*open=*/true, /*blind=*/true);
+    }
+
+    // HDRM-Ablaeufe: Versuch, Pruefung, Wackeln, Wiederholung.
+    updateHdrm(0, now_ms);
+    updateHdrm(1, now_ms);
+
+    // Beide nachweislich offen: im EEPROM vermerken (Motoren stehen) - nach
+    // einem Neustart weiss der OBC dann, dass der Arm fahren darf.
+    if (!(flight_flags_ & FLIGHT_HDRM_OPEN_OK) && hdrm_[0].open && hdrm_[1].open &&
+        hdrm_[0].phase == HdrmCtl::Phase::DONE && hdrm_[1].phase == HdrmCtl::Phase::DONE &&
+        !motorsRunning()) {
+        flight_flags_ |= FLIGHT_HDRM_OPEN_OK;
+        persist_.saveFlightFlags(flight_flags_);
+        persist_.saveHdrmBlind(hdrm_blind_);
+        if (hdrm_blind_) {
+            Log.printf("WARN  [System]: HDRM-Maske 0x%02X nur auf Zeit geoeffnet (kein Encoder) - "
+                       "Arm-Trajektorie bricht ab, wenn der Arm %lu ms nicht vorankommt.\n",
+                       hdrm_blind_, static_cast<unsigned long>(ARM_BLIND_STUCK_MS));
+        }
+        Log.println("INFO  [System]: Beide HDRMs offen (Encoder am Ziel) - Arm darf fahren.");
+        sd_.eventf("HDRM_OFFEN", "beide HDRMs offen, Versuche %u / %u",
+                   hdrm_[0].attempts, hdrm_[1].attempts);
     }
 
     if (state == MissionState::ROBOT_ARM || state == MissionState::DESCENT) armFlightStep(now_ms, state);
 
-    // DESCENT: jeden Motor blockieren, sobald seine Schliessfahrt vorbei ist.
+    // DESCENT: jeden Motor blockieren, sobald sein HDRM zu ist (oder es
+    // nach einem Neustart nichts mehr zu tun gibt).
     if (state == MissionState::DESCENT) {
+        MotorHAL* const motors[2] = { motor_, motor2_ };
+        const bool ready[2]       = { motor_ready_, motor2_ready_ };
         for (uint8_t i = 0; i < 2; i++) {
             MotorHAL* m = motors[i];
-            if (!ready[i] || !m || hdrm_move_[i].pending || m->isTurning() || m->isLocked()) continue;
+            const HdrmCtl::Phase ph = hdrm_[i].phase;
+            const bool finished = ph == HdrmCtl::Phase::IDLE ||
+                                  (ph == HdrmCtl::Phase::DONE && !hdrm_[i].open);
+            if (!ready[i] || !m || !finished || m->isBusy() || m->isLocked()) continue;
             m->lock();
-            Serial.printf("INFO  [System]: %s blockiert (alle Motor-Pins HIGH).\n", labels[i]);
+            Log.printf("INFO  [System]: HDRM%u blockiert (alle Motor-Pins HIGH).\n", i + 1);
         }
     }
 }
 
-void System::scheduleHdrmMoves(uint32_t now_ms, int16_t degrees) {
-    hdrm_move_[0] = { true, now_ms, degrees };
-    hdrm_move_[1] = { true, now_ms + timeline::HDRM_STAGGER_MS, degrees };
+void System::startHdrms(uint32_t now_ms, bool open, bool blind) {
+    MotorHAL* const motors[2] = { motor_, motor2_ };
+    const bool ready[2]       = { motor_ready_, motor2_ready_ };
+    const long delta = static_cast<long>(open ? timeline::HDRM_OPEN_DEG : timeline::HDRM_CLOSE_DEG) *
+                       MotorHAL::COUNTS_PER_REV / 360;
+    for (uint8_t i = 0; i < 2; i++) {
+        HdrmCtl& h = hdrm_[i];
+        h.open     = open;
+        h.blind    = blind;
+        h.attempts = 0;
+        h.no_move  = 0;
+        // HDRM 2 um HDRM_STAGGER_MS versetzt (Anlaufstrom).
+        h.next_ms  = now_ms + (i ? timeline::HDRM_STAGGER_MS : 0);
+        if (!ready[i] || !motors[i]) {
+            // Ohne Motor gibt es nichts zu tun - darf den Arm aber nicht blockieren.
+            h.phase = HdrmCtl::Phase::DONE;
+            if (open) hdrm_blind_ |= static_cast<uint8_t>(1u << i);
+            Log.printf("WARN  [System]: HDRM%u ohne Motor - gilt als %s, damit der Arm nicht blockiert.\n",
+                       i + 1, open ? "offen" : "zu");
+            continue;
+        }
+        if (!motors[i]->hasEncoder()) {
+            h.phase = HdrmCtl::Phase::OPEN_LOOP;   // Start in updateHdrm()
+            h.next_ms = 0;
+            continue;
+        }
+        const long pos = motors[i]->getPosition();
+        h.ref_pos = pos;
+        if (open) {
+            if (!blind) {
+                hdrm_closed_pos_[i]   = pos;
+                hdrm_closed_known_[i] = true;
+            }
+            h.target = pos + delta;
+        } else {
+            // Ziel "zu" = Position vor dem Oeffnen. Nach einem Neustart ist sie
+            // unbekannt (Encoder zaehlt ab 0) - dann relativ wie bisher.
+            h.target = hdrm_closed_known_[i] ? hdrm_closed_pos_[i] : pos + delta;
+        }
+        h.phase = HdrmCtl::Phase::WAIT;
+    }
+}
+
+void System::cancelHdrms() {
+    for (HdrmCtl& h : hdrm_) h.phase = HdrmCtl::Phase::IDLE;
+}
+
+void System::updateHdrm(uint8_t i, uint32_t now_ms) {
+    HdrmCtl& h = hdrm_[i];
+    MotorHAL* m = i ? motor2_ : motor_;
+    if (!m || h.phase == HdrmCtl::Phase::IDLE || h.phase == HdrmCtl::Phase::DONE) return;
+    uint32_t& on_since = i ? motor2_on_since_ms_ : motor_on_since_ms_;
+    const char* what = h.open ? "oeffnen" : "schliessen";
+    // Drehrichtung "oeffnen" (HDRM_OPEN_DEG < 0 = negative Counts).
+    const long open_dir = timeline::HDRM_OPEN_DEG < 0 ? -1 : 1;
+    const long dir      = h.open ? open_dir : -open_dir;
+
+    auto finish = [&](const char* how) {
+        h.phase = HdrmCtl::Phase::DONE;
+        Log.printf("INFO  [System]: HDRM%u %s (%s, %u Versuch(e), Position %ld).\n",
+                   i + 1, h.open ? "offen" : "zu", how, h.attempts, m->getPosition());
+        sd_.eventf(h.open ? "HDRM_AUF" : "HDRM_ZU", "HDRM%u %s, %u Versuch(e), Position %ld, Ziel %ld",
+                   i + 1, how, h.attempts, m->getPosition(), h.target);
+    };
+
+    switch (h.phase) {
+        case HdrmCtl::Phase::WAIT:
+            if (static_cast<int32_t>(now_ms - h.next_ms) < 0) return;
+            h.attempts++;
+            h.try_pos = m->getPosition();
+            Log.printf("INFO  [System]: HDRM%u %s - Versuch %u (Position %ld, Ziel %ld%s).\n",
+                       i + 1, what, h.attempts, h.try_pos, h.target, h.blind ? ", Lage unbekannt" : "");
+            on_since = now_ms;
+            m->moveTo(h.target);
+            h.phase = HdrmCtl::Phase::MOVING;
+            return;
+
+        case HdrmCtl::Phase::MOVING: {
+            if (m->isBusy()) return;
+            const long pos = m->getPosition();
+            // OFFEN: mindestens HDRM_OPEN_MIN_DEG in Oeffnungsrichtung gedreht
+            // (weiter ist auch gut). ZU: nah genug an der Ausgangslage.
+            bool done;
+            if (h.open) {
+                const long opened = open_dir * (pos - h.ref_pos);
+                done = opened >= static_cast<long>(timeline::HDRM_OPEN_MIN_DEG) * MotorHAL::COUNTS_PER_REV / 360;
+            } else if (h.blind || !hdrm_closed_known_[i]) {
+                const long closed = -open_dir * (pos - h.ref_pos);
+                done = closed >= static_cast<long>(-timeline::HDRM_OPEN_DEG - timeline::HDRM_CLOSE_TOL_DEG) *
+                                 MotorHAL::COUNTS_PER_REV / 360;
+            } else {
+                done = labs(pos - h.target) <=
+                       static_cast<long>(timeline::HDRM_CLOSE_TOL_DEG) * MotorHAL::COUNTS_PER_REV / 360;
+            }
+            if (done) { finish("Encoder am Ziel"); return; }
+
+            // Lage unbekannt (Neustart mitten im Ablauf): Es kann schon fast
+            // offen gewesen sein - nach HDRM_BLIND_MAX_ATTEMPTS gilt es als
+            // offen, damit der Arm startet (Nutzer, 19.11.2026).
+            if (h.blind && h.attempts >= HDRM_BLIND_MAX_ATTEMPTS) {
+                Log.printf("WARN  [System]: HDRM%u nach Neustart %u Versuche - gilt als %s.\n",
+                           i + 1, h.attempts, h.open ? "offen" : "zu");
+                finish("angenommen nach Neustart");
+                return;
+            }
+
+            // Encoder hat sich gar nicht bewegt? Mehrmals in Folge = Encoder
+            // tot (oder Mechanik fest) - dann auf Zeit fahren.
+            h.no_move = labs(pos - h.try_pos) < HDRM_NO_MOVE_COUNTS ? h.no_move + 1 : 0;
+            if (h.no_move >= HDRM_ENCODER_DEAD_TRIES) {
+                Log.printf("WARN  [System]: HDRM%u: %u Versuche ohne Encoder-Bewegung - fahre %lu ms auf Zeit.\n",
+                           i + 1, h.no_move, static_cast<unsigned long>(HDRM_OPEN_LOOP_MS));
+                h.phase = HdrmCtl::Phase::OPEN_LOOP;
+                h.next_ms = 0;
+                return;
+            }
+
+            // Nicht weit genug: im Getriebespiel wackeln, dann neuer Versuch.
+            Log.printf("WARN  [System]: HDRM%u nicht %s (Position %ld, Ziel %ld) - wackeln und erneut.\n",
+                       i + 1, h.open ? "offen" : "zu", pos, h.target);
+            sd_.eventf("HDRM_FEHLVERSUCH", "HDRM%u %s Versuch %u, Position %ld, Ziel %ld",
+                       i + 1, what, h.attempts, pos, h.target);
+            on_since = now_ms;
+            m->wiggle();
+            h.phase = HdrmCtl::Phase::WIGGLE;
+            return;
+        }
+
+        case HdrmCtl::Phase::WIGGLE: {
+            if (m->isBusy()) return;
+            uint32_t pause = HDRM_RETRY_PAUSE_MS * h.attempts;
+            if (pause > HDRM_RETRY_PAUSE_MAX_MS) pause = HDRM_RETRY_PAUSE_MAX_MS;
+            h.next_ms = now_ms + pause;
+            h.phase   = HdrmCtl::Phase::WAIT;
+            return;
+        }
+
+        case HdrmCtl::Phase::OPEN_LOOP:
+            // Ohne (funktionierenden) Encoder: einmal mit fester PWM in die
+            // richtige Richtung, HDRM_OPEN_LOOP_MS lang - dann gilt es als fertig.
+            if (h.next_ms == 0) {
+                h.attempts++;
+                Log.printf("WARN  [System]: HDRM%u %s auf Zeit (%lu ms, ohne Encoder).\n",
+                           i + 1, what, static_cast<unsigned long>(HDRM_OPEN_LOOP_MS));
+                on_since = now_ms;
+                m->on(static_cast<int16_t>(dir * HDRM_OPEN_LOOP_SPEED));
+                h.next_ms = now_ms + HDRM_OPEN_LOOP_MS;
+                if (h.next_ms == 0) h.next_ms = 1;
+                return;
+            }
+            if (static_cast<int32_t>(now_ms - h.next_ms) < 0) return;
+            m->off();
+            if (h.open) hdrm_blind_ |= static_cast<uint8_t>(1u << i);   // ohne Encoder-Beweis
+            finish("auf Zeit gefahren");
+            return;
+
+        default:
+            return;
+    }
 }
 
 void System::planDescent(uint32_t now_ms) {
-    // Nur schliessen, was geoeffnet wurde - und nur einmal pro Flug (siehe
-    // handleFlight). Danach blockiert handleFlight() beide Motoren.
+    // Nur schliessen, was geoeffnet wurde - und nur einmal pro Flug. Ein
+    // HDRM-Ablauf, der noch am Oeffnen ist, wird zum Schliessen umgestellt.
+    // Danach blockiert handleFlight() beide Motoren.
     if (!(flight_flags_ & FLIGHT_HDRM_OPENED) || (flight_flags_ & FLIGHT_HDRM_CLOSED)) return;
     flight_flags_ |= FLIGHT_HDRM_CLOSED;
     persist_.saveFlightFlags(flight_flags_);
-    Serial.println("INFO  [System]: DESCENT - HDRMs schliessen.");
-    scheduleHdrmMoves(now_ms, timeline::HDRM_CLOSE_DEG);
+    Log.println("INFO  [System]: DESCENT - HDRMs schliessen.");
+    if (motor_)  motor_->off();
+    if (motor2_) motor2_->off();
+    startHdrms(now_ms, /*open=*/false);
 }
 
 uint8_t System::currentSignalBits() const {
@@ -946,9 +1476,12 @@ uint8_t System::currentSignalBits() const {
 }
 
 bool System::hdrmsOpenDone() const {
+    // Nur wenn beide NACHWEISLICH offen sind - im EEPROM vermerkt (auch ueber
+    // einen Neustart) oder in diesem Lauf vom HDRM-Ablauf bestaetigt.
     if (!(flight_flags_ & FLIGHT_HDRM_OPENED)) return false;
-    if (hdrm_move_[0].pending || hdrm_move_[1].pending) return false;
-    return !(motor_ && motor_->isTurning()) && !(motor2_ && motor2_->isTurning());
+    if (flight_flags_ & FLIGHT_HDRM_OPEN_OK) return true;
+    return hdrm_[0].open && hdrm_[1].open &&
+           hdrm_[0].phase == HdrmCtl::Phase::DONE && hdrm_[1].phase == HdrmCtl::Phase::DONE;
 }
 
 void System::armFlightStep(uint32_t now_ms, MissionState state) {
@@ -972,24 +1505,27 @@ void System::armFlightStep(uint32_t now_ms, MissionState state) {
             if (!arm_flight_.resume(saved, valid, now_ms)) {
                 if (!arm_flight_refused_logged_) {
                     arm_flight_refused_logged_ = true;
-                    Serial.println("WARN  [System]: Flug-Trajektorie kann nicht fortgesetzt werden "
+                    Log.println("WARN  [System]: Flug-Trajektorie kann nicht fortgesetzt werden "
                                    "(Tabelle nicht ok).");
                 }
                 return;
             }
         } else {
             if (state != MissionState::ROBOT_ARM) return;   // in DESCENT nie neu starten
+            // Zweite Sicherung neben der Zustandsmaschine: nie mit einem HDRM,
+            // das nicht nachweislich offen ist (Klappe zu = Arm faehrt dagegen).
+            if (!(flight_flags_ & FLIGHT_HDRM_OPEN_OK)) return;
             if (!armFlightGateOpen(now_ms)) return;
             if (!arm_flight_.tableOk()) {
                 if (!arm_flight_refused_logged_) {
                     arm_flight_refused_logged_ = true;
-                    Serial.println("WARN  [System]: Flug-Trajektorie freigegeben, aber keine gueltige "
+                    Log.println("WARN  [System]: Flug-Trajektorie freigegeben, aber keine gueltige "
                                    "Tabelle eingebaut - der Arm bleibt stehen.");
                 }
                 return;
             }
             if (!arm_flight_.start(*arm_, now_ms)) return;   // TX-Puffer voll: naechster Loop
-            Serial.printf("INFO  [System]: Flug-Trajektorie gestartet (Freigabe:%s%s%s).\n",
+            Log.printf("INFO  [System]: Flug-Trajektorie gestartet (Freigabe:%s%s%s).\n",
                           arm_flight_enabled_ ? " Flug-Schalter" : "",
                           ug_obc_.active(now_ms) ? " OBC-IMU" : "",
                           ug_rcu_.active(now_ms) ? " RCU-IMU" : "");
@@ -1000,6 +1536,33 @@ void System::armFlightStep(uint32_t now_ms, MissionState state) {
     }
 
     arm_flight_.update(*arm_, now_ms);
+
+    // HDRM nur "blind" offen (kein Encoder-Beweis): Haengt ein antwortendes
+    // Gelenk ARM_BLIND_STUCK_MS lang hinter der Bahn, steht vermutlich die
+    // Klappe im Weg - dann Trajektorie abbrechen und Arm anhalten. Bei
+    // bestaetigt offenen HDRMs NIE (dort wartet/faehrt der Player wie gehabt).
+    if (hdrm_blind_ && arm_flight_.active()) {
+        const bool stuck = arm_flight_.holding() || arm_flight_.lagMask() != 0;
+        if (!stuck) {
+            arm_stuck_since_ms_ = 0;
+        } else if (arm_stuck_since_ms_ == 0) {
+            arm_stuck_since_ms_ = now_ms ? now_ms : 1;
+        } else if (static_cast<int32_t>(now_ms - arm_stuck_since_ms_) >=
+                   static_cast<int32_t>(ARM_BLIND_STUCK_MS)) {
+            Log.printf("WARN  [System]: Arm kommt %lu ms nicht voran (Gelenk-Maske 0x%02X) und HDRM 0x%02X "
+                       "war nur auf Zeit offen - Trajektorie ABGEBROCHEN, Arm gestoppt.\n",
+                       static_cast<unsigned long>(ARM_BLIND_STUCK_MS), arm_flight_.lagMask(), hdrm_blind_);
+            sd_.eventf("ARM_ABBRUCH", "Arm kommt nicht voran, HDRM 0x%02X ohne Encoder-Beweis, Schritt %u",
+                       hdrm_blind_, arm_flight_.step());
+            arm_flight_.cancel("Arm kommt nicht voran, HDRM nur auf Zeit offen");
+            arm_->stopAll();
+            arm_->inhibitAll();
+            flight_flags_ |= FLIGHT_ARM_DONE;   // nicht wieder anlaufen (auch nach Neustart)
+            persist_.saveFlightFlags(flight_flags_);
+            arm_stuck_since_ms_ = 0;
+            return;
+        }
+    }
 
     if (arm_flight_.done()) {
         flight_flags_ |= FLIGHT_ARM_DONE;
@@ -1036,7 +1599,7 @@ void System::sendArmFlightStatus(uint32_t now_ms) {
 void System::setArmFlightEnable(bool enable) {
     arm_flight_enabled_ = enable;
     persist_.saveArmFlightEnable(enable);
-    Serial.printf("%s [System]: Flug-Schalter Roboterarm %s.\n", enable ? "WARN " : "INFO ",
+    Log.printf("%s [System]: Flug-Schalter Roboterarm %s.\n", enable ? "WARN " : "INFO ",
                   enable ? "AN - in ROBOT_ARM faehrt der Arm sofort, auch ohne Schwerelosigkeit"
                          : "aus");
     if (downlink_ready_ && downlink_) sendArmFlightStatus(millis());
@@ -1100,9 +1663,11 @@ void System::handleUplink(uint32_t now_ms) {
     UplinkCommand cmd;
     while (uplink_->poll(cmd)) {
         const UplinkOpcode op = static_cast<UplinkOpcode>(cmd.opcode);
+        const bool allowed = commandAllowed(op);
+        sd_.pushTelecommand(cmd.opcode, static_cast<int16_t>(cmd.arg), allowed);
 
-        if (!commandAllowed(op)) {
-            Serial.printf("WARN  [System]: Telecommand 0x%02X abgewiesen - im Zustand %s "
+        if (!allowed) {
+            Log.printf("WARN  [System]: Telecommand 0x%02X abgewiesen - im Zustand %s "
                           "nicht zulaessig.\n",
                           cmd.opcode, StateMachine::toString(state_machine_.getState()));
             continue;
@@ -1125,7 +1690,7 @@ void System::handleUplink(uint32_t now_ms) {
                 // ausschalten ueberall, wo das Kommando ankommt (Boden + ARMED).
                 const bool enable = cmd.arg != 0;
                 if (enable && state_machine_.getState() != MissionState::PRE_LAUNCH) {
-                    Serial.printf("WARN  [System]: ARM_FLIGHT_ENABLE an nur in PRE_LAUNCH - "
+                    Log.printf("WARN  [System]: ARM_FLIGHT_ENABLE an nur in PRE_LAUNCH - "
                                   "im Zustand %s abgewiesen.\n",
                                   StateMachine::toString(state_machine_.getState()));
                     continue;
@@ -1149,7 +1714,7 @@ void System::handleUplink(uint32_t now_ms) {
                     tareForceSensor(force2_, force2_ready_, "Kraftsensor 2");
                 }
                 if (cmd.arg < 0 || cmd.arg > 2) {
-                    Serial.printf("WARN  [System]: FORCE_TARE mit ungueltigem ARG %d "
+                    Log.printf("WARN  [System]: FORCE_TARE mit ungueltigem ARG %d "
                                   "(0=beide, 1=Sensor 1, 2=Sensor 2) - ignoriert.\n",
                                   cmd.arg);
                 }
@@ -1159,13 +1724,13 @@ void System::handleUplink(uint32_t now_ms) {
                 // Ausschalten ist ein SICHERHEITSkommando und deshalb in allen
                 // Bodenzustaenden erlaubt, nicht nur in TEST (im Flug und in
                 // DESCENT sperrt es commandAllowed()).
-                Serial.println("INFO  [System]: TC MOTOR_OFF");
+                Log.println("INFO  [System]: TC MOTOR_OFF");
                 execMotorAction(motor_, motor_ready_, "MOTOR", MotorAction::OFF, 0, motor_on_since_ms_);
                 continue;
 
             case UplinkOpcode::MOTOR2_OFF:
                 // Gleiche Ausnahme wie MOTOR_OFF, fuer Motor 2.
-                Serial.println("INFO  [System]: TC MOTOR2_OFF");
+                Log.println("INFO  [System]: TC MOTOR2_OFF");
                 execMotorAction(motor2_, motor2_ready_, "MOTOR2", MotorAction::OFF, 0, motor2_on_since_ms_);
                 continue;
 
@@ -1175,7 +1740,7 @@ void System::handleUplink(uint32_t now_ms) {
                 // ausserhalb der TEST-Sperre. Gelenk 0 = alle.
                 const bool stop = op == UplinkOpcode::ARM_STOP;
                 const uint8_t node = armNode(cmd);
-                Serial.printf("INFO  [System]: TC %s Gelenk %u%s\n",
+                Log.printf("INFO  [System]: TC %s Gelenk %u%s\n",
                               stop ? "ARM_STOP" : "ARM_INHIBIT", node, node == 0 ? " (alle)" : "");
                 // Laufende Trajektorie zuerst beenden, sonst schickt der
                 // Player im naechsten Takt schon wieder ein Ziel.
@@ -1196,16 +1761,16 @@ void System::handleUplink(uint32_t now_ms) {
                 const uint8_t cam    = static_cast<uint8_t>((static_cast<uint16_t>(cmd.arg) >> 8) & 0xFF);
                 const uint8_t action = static_cast<uint8_t>(static_cast<uint16_t>(cmd.arg) & 0xFF);
                 if (cam > CAM_COUNT || action < 1 || action > 3) {
-                    Serial.printf("WARN  [System]: TC CAMERA mit ungueltigem ARG 0x%04X - ignoriert.\n",
+                    Log.printf("WARN  [System]: TC CAMERA mit ungueltigem ARG 0x%04X - ignoriert.\n",
                                   static_cast<uint16_t>(cmd.arg));
                     continue;
                 }
                 const CamAction a = static_cast<CamAction>(action);
                 if (a == CamAction::STOP && !StateMachine::isGround(state_machine_.getState())) {
-                    Serial.println("WARN  [System]: TC CAMERA Stopp nur am Boden (PRE_LAUNCH/TEST) - abgewiesen.");
+                    Log.println("WARN  [System]: TC CAMERA Stopp nur am Boden (PRE_LAUNCH/TEST) - abgewiesen.");
                     continue;
                 }
-                Serial.printf("INFO  [System]: TC CAMERA %s Kamera %u%s\n",
+                Log.printf("INFO  [System]: TC CAMERA %s Kamera %u%s\n",
                               a == CamAction::START ? "Start" : a == CamAction::STOP ? "Stopp" : "Abfrage",
                               cam, cam == 0 ? " (alle)" : "");
                 if (!cam_ || !cam_ready_) continue;
@@ -1216,7 +1781,7 @@ void System::handleUplink(uint32_t now_ms) {
             case UplinkOpcode::ARM_BLINK: {
                 // Bewegt nichts - zur Zuordnung Node-ID <-> Gelenk am Aufbau.
                 const uint8_t node = armNode(cmd);
-                Serial.printf("INFO  [System]: TC ARM_BLINK Gelenk %u\n", node);
+                Log.printf("INFO  [System]: TC ARM_BLINK Gelenk %u\n", node);
                 if (arm_ && arm_ready_ && node >= 1 && node <= ARM_MAX_JOINTS) {
                     arm_->sendCommand(node, ArmMsg::BLINK);
                 }
@@ -1229,14 +1794,14 @@ void System::handleUplink(uint32_t now_ms) {
 
         // Alles Weitere greift auf Aktoren zu und ist nur im TEST-Zustand frei.
         if (!state_machine_.actuatorsUnlocked()) {
-            Serial.printf("WARN  [System]: Telecommand 0x%02X abgewiesen - "
+            Log.printf("WARN  [System]: Telecommand 0x%02X abgewiesen - "
                           "Zustand %s, Aktoren gesperrt (TEST_ENTER senden).\n",
                           cmd.opcode, StateMachine::toString(state_machine_.getState()));
             continue;
         }
 
         if (!handleMotorCommand(cmd) && !handleArmCommand(cmd)) {
-            Serial.printf("WARN  [System]: Unbekanntes Telecommand 0x%02X ignoriert.\n",
+            Log.printf("WARN  [System]: Unbekanntes Telecommand 0x%02X ignoriert.\n",
                           cmd.opcode);
         }
     }
@@ -1245,20 +1810,20 @@ void System::handleUplink(uint32_t now_ms) {
 bool System::execMotorAction(MotorHAL* motor, bool ready, const char* label,
                              MotorAction action, int16_t arg, uint32_t& on_since_ms) {
     if (!ready || !motor) {
-        Serial.printf("WARN  [System]: %s-Telecommand ohne initialisierten Motor - ignoriert.\n", label);
+        Log.printf("WARN  [System]: %s-Telecommand ohne initialisierten Motor - ignoriert.\n", label);
         return true;   // bekanntes Kommando, nur keine Hardware
     }
 
     switch (action) {
         case MotorAction::ON:
-            Serial.printf("INFO  [System]: TC %s_ON (speed=%d)\n", label, arg);
+            Log.printf("INFO  [System]: TC %s_ON (speed=%d)\n", label, arg);
             motor->on(arg);
             on_since_ms = millis();
             return true;
         case MotorAction::TURN:
-            Serial.printf("INFO  [System]: TC %s_TURN (%d Grad relativ)\n", label, arg);
+            Log.printf("INFO  [System]: TC %s_TURN (%d Grad relativ)\n", label, arg);
             if (!motor->hasEncoder()) {
-                Serial.printf("WARN  [System]: %s_TURN ohne Encoder - ignoriert.\n", label);
+                Log.printf("WARN  [System]: %s_TURN ohne Encoder - ignoriert.\n", label);
                 return true;
             }
             motor->turnBy(arg);
@@ -1267,20 +1832,20 @@ bool System::execMotorAction(MotorHAL* motor, bool ready, const char* label,
             on_since_ms = millis();
             return true;
         case MotorAction::GOTO:
-            Serial.printf("INFO  [System]: TC %s_GOTO (%d Grad absolut)\n", label, arg);
+            Log.printf("INFO  [System]: TC %s_GOTO (%d Grad absolut)\n", label, arg);
             if (!motor->hasEncoder()) {
-                Serial.printf("WARN  [System]: %s_GOTO ohne Encoder - ignoriert.\n", label);
+                Log.printf("WARN  [System]: %s_GOTO ohne Encoder - ignoriert.\n", label);
                 return true;
             }
             motor->goTo(arg);
             on_since_ms = millis();
             return true;
         case MotorAction::OFF:
-            Serial.printf("INFO  [System]: TC %s_OFF\n", label);
+            Log.printf("INFO  [System]: TC %s_OFF\n", label);
             motor->off();
             return true;
         case MotorAction::ZERO:
-            Serial.printf("INFO  [System]: TC %s_ZERO - Encoder-Zaehler auf 0\n", label);
+            Log.printf("INFO  [System]: TC %s_ZERO - Encoder-Zaehler auf 0\n", label);
             motor->zeroPosition();
             return true;
     }
@@ -1319,8 +1884,14 @@ void System::checkMotorTimeout(MotorHAL* motor, bool ready, const char* label,
                                uint32_t on_since_ms, uint32_t now_ms) {
     if (!ready || !motor || !motor->isOn()) return;
 
-    if (now_ms - on_since_ms >= MOTOR_ON_TIMEOUT_MS) {
-        Serial.printf("WARN  [System]: %s-Laufzeit ueber %lu ms - "
+    // VORZEICHENBEHAFTET vergleichen: now_ms ist der Zeitpunkt vom Loop-Anfang,
+    // on_since_ms setzt execMotorAction() mit millis() SPAETER im selben Loop.
+    // Dauerte der Loop bis dahin >= 1 ms (EEPROM-Schreiben der Flugflags,
+    // Log-Ausgabe), war now_ms - on_since_ms "negativ" = ~4 Mrd. als uint32_t
+    // - und jede gerade gestartete Fahrt wurde sofort wieder gestoppt
+    // (Bodentest 19.11.2026: HDRM 2 oeffnete nie, keins schloss).
+    if (static_cast<int32_t>(now_ms - on_since_ms) >= static_cast<int32_t>(MOTOR_ON_TIMEOUT_MS)) {
+        Log.printf("WARN  [System]: %s-Laufzeit ueber %lu ms - "
                       "automatisch gestoppt. Erneut %s_ON senden.\n",
                       label, static_cast<unsigned long>(MOTOR_ON_TIMEOUT_MS), label);
         motor->off();
@@ -1339,14 +1910,14 @@ void System::handleMotorTimeout(uint32_t now_ms) {
 }
 
 void System::printWelcomeBanner() {
-    Serial.println("\n");
-    Serial.println("╔═════════════════════════════════════════════════╗");
-    Serial.println("║             MAGGIE On-Board Computer            ║");
-    Serial.println("║     REXUS Program - Rocket Experiment System    ║");
-    Serial.println("║                     v 1.0                       ║");
-    Serial.println("╚═════════════════════════════════════════════════╝");
-    Serial.println("");
-    Serial.println("Built by MAGGIE Team on Teensy 4.1");
-    Serial.println("Copyright 2026 - All Rights Reserved");
-    Serial.println("");
+    Log.println("\n");
+    Log.println("╔═════════════════════════════════════════════════╗");
+    Log.println("║             MAGGIE On-Board Computer            ║");
+    Log.println("║     REXUS Program - Rocket Experiment System    ║");
+    Log.println("║                     v 1.0                       ║");
+    Log.println("╚═════════════════════════════════════════════════╝");
+    Log.println("");
+    Log.println("Built by MAGGIE Team on Teensy 4.1");
+    Log.println("Copyright 2026 - All Rights Reserved");
+    Log.println("");
 }

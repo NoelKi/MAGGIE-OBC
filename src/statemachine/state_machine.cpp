@@ -1,4 +1,5 @@
 #include "statemachine/state_machine.hpp"
+#include "obc_log.hpp"
 #include "mission_timeline.hpp"
 #include <Arduino.h>
 
@@ -45,7 +46,7 @@ MissionState StateMachine::stateAfterReboot(uint8_t stored, bool valid) {
 
 void StateMachine::transitionTo(MissionState next, uint32_t now_ms) {
     if (next == state_) return;
-    Serial.printf("INFO  [StateMachine]: %s -> %s (t=%lu ms)\n",
+    Log.printf("INFO  [StateMachine]: %s -> %s (t=%lu ms)\n",
                   toString(state_), toString(next),
                   static_cast<unsigned long>(now_ms));
 
@@ -101,7 +102,7 @@ void StateMachine::update(uint32_t now_ms, const StateMachineInputs& in) {
 
 bool StateMachine::enterTest(uint32_t now_ms) {
     if (state_ != MissionState::PRE_LAUNCH) {
-        Serial.printf("WARN  [StateMachine]: TEST_ENTER abgelehnt - Zustand ist %s.\n",
+        Log.printf("WARN  [StateMachine]: TEST_ENTER abgelehnt - Zustand ist %s.\n",
                       toString(state_));
         return false;
     }

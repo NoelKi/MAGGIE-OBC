@@ -10,10 +10,12 @@
  *
  *   EXPERIMENT   t0 + 2,000 s  HDRM 1 oeffnen
  *                t0 + 2,010 s  HDRM 2 oeffnen
- *                beide Fahrten beendet ──► ROBOT_ARM
+ *                jedes HDRM wird wiederholt (Wackeln + neuer Versuch), bis der
+ *                Encoder "offen" meldet; beide nachweislich offen ──► ROBOT_ARM
  *   ROBOT_ARM    Roboterarm (Platzhalter) bis t0 + 115 s ──► DESCENT
- *   DESCENT      HDRM 1 schliessen, 10 ms spaeter HDRM 2, danach beide Motoren
- *                blockiert (alle Motor-Pins HIGH) bis Strom aus / STATE_RESET
+ *   DESCENT      HDRM 1 schliessen, 10 ms spaeter HDRM 2 - ebenfalls wiederholt,
+ *                bis zu; dann den Motor blockieren (alle Motor-Pins HIGH) bis
+ *                Strom aus / STATE_RESET
  *
  * Zeitbezug: In ASCENT laeuft die Zeit ab LO, ab EXPERIMENT ab t0 (Eintritt in
  * EXPERIMENT). ROBOT_ARM und DESCENT behalten t0.
@@ -48,8 +50,17 @@ constexpr uint32_t MICROGRAVITY_END_MS = 120000;
 constexpr int16_t HDRM_OPEN_DEG  = -165;
 constexpr int16_t HDRM_CLOSE_DEG = +165;
 
+/// Ab so viel Grad in Oeffnungsrichtung gilt ein HDRM als OFFEN - auch wenn es
+/// vor den vollen HDRM_OPEN_DEG stehen bleibt (Nutzer, 19.11.2026: "wegen 10
+/// Grad soll der Arm nicht blockiert sein"). Darunter: wackeln + neuer Versuch.
+constexpr int16_t HDRM_OPEN_MIN_DEG = 140;
+/// So nah an der Ausgangslage gilt ein HDRM beim Schliessen als ZU.
+constexpr int16_t HDRM_CLOSE_TOL_DEG = 25;
+
 static_assert(HDRM_OPEN_AT_MS + HDRM_STAGGER_MS < DESCENT_AT_MS,
               "HDRMs muessen vor DESCENT geoeffnet sein");
+static_assert(HDRM_OPEN_MIN_DEG > 0 && HDRM_OPEN_MIN_DEG <= -HDRM_OPEN_DEG,
+              "HDRM_OPEN_MIN_DEG muss zwischen 0 und dem vollen Oeffnungswinkel liegen");
 static_assert(DESCENT_AT_MS < MICROGRAVITY_END_MS,
               "HDRMs muessen vor Ende der Mikrogravitation schliessen");
 

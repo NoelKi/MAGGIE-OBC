@@ -135,6 +135,7 @@ public:
     uint8_t  faultLive()   const { return fault_live_; }    ///< Bit k = Spalte k hat gerade eins
     bool     resumed()     const { return resumed_; }
     bool     holding()     const { return holding_; }        ///< Bahn wartet gerade auf ein Gelenk
+    uint8_t  lagMask()     const { return lag_mask_; }       ///< Spalten, die >TRACK_ERR_DEG hinterherhaengen
     uint32_t pauseUsedMs() const { return pause_used_ms_; }
     uint16_t txSkips()     const { return tx_skips_; }
     bool     takeChanged() { const bool c = changed_; changed_ = false; return c; }

@@ -81,3 +81,69 @@ flight`) im Zustand ROBOT_ARM ab. Vom Nutzer am 17.11.2026 so festgelegt:
 - STOP per Telecommand nur am Boden (PRE_LAUNCH/TEST).
 - Aenderungen am Treiber erst im Host-Test pruefen:
   `tools/camera_sim/run.sh` muss "ALLES OK" melden.
+
+### 5. Nie haengen bleiben, keine Reset-Schleife
+
+Vom Nutzer am 19.11.2026 als "wirklich wichtig" festgelegt:
+
+- Im Loop nichts Blockierendes. Was haengen koennte, bekommt eine Brotkrume
+  (`bootguard::stage()` / `bootguard::Scope`, `boot_guard.hpp`), damit der
+  Boot-Guard nach einem Watchdog-Reset das schuldige Subsystem auslaesst.
+  Neue verzichtbare Subsysteme dort mit eigener Stage und `GUARD_OFF_*` anlegen.
+- Der Watchdog startet als Erstes in `setup()`. Nicht wieder ans Ende von
+  `init()` schieben. In `init()` zwischen langen Schritten `watchdogFeed()`.
+- Minimalmodus (ab 3 Resets in Folge) und das Auslassen nach einem Haenger
+  nicht entfernen oder lockern, ohne den Nutzer zu fragen.
+
+### 6. SD-Karte (`SdLogger`)
+
+- **Alles** kommt auf die Karte, unabhaengig vom Downlink, als CSV je
+  Subsystem unter `/MAGGIE/<Datum>/<Uhrzeit>_B<Boot>/` (Nutzer, 19.11.2026).
+  Neue Messwerte bekommen einen eigenen Datensatz-Typ und eine Spalte bzw.
+  Datei, und `LIESMICH.TXT` (Text in `sd_logger.cpp`) wird mitgepflegt.
+- `push*()` darf nie auf die Karte zugreifen; Kartenzugriffe nur in
+  `service()`, hoechstens einer pro Loop, nie waehrend ein Motor laeuft.
+- Debug-Ausgaben mit `Log.printf(...)` statt `Serial.printf(...)` - sonst
+  fehlen sie in `LOG.txt`.
+- Aenderungen am Logger erst im Host-Test pruefen:
+  `tools/sd_sim/run.sh` muss "ALLES OK" melden.
+
+### 7. Downlink-Prioritaeten
+
+Vom Nutzer am 19.11.2026 festgelegt (`DownlinkPrio`, Raten in `data_rates.hpp`):
+
+1. **Status** (harte Prioritaet): Zustand, HDRM offen, Arm/Kameras/Sensoren an
+   - alles in SYS/STATE (2 Hz + bei jedem Wechsel), dazu die Diagnose-Frames.
+2. **Bewegung**: Gelenkwinkel (ARM/JOINT) - man muss sehen, dass der Arm faehrt.
+3. **Rest**: alle Sensordaten, ausgeduennt, sodass die Summe in die Leitung passt.
+
+- Neue Frames einer Stufe zuordnen (`TelemetryDownlink::prioOf`) und keine
+  Schuebe erzeugen (mehrere Frames auf einmal reihum verteilen).
+- Aenderungen an Raten oder Stufen erst im Host-Test pruefen:
+  `tools/downlink_sim/run.sh` muss fuer beide Baudraten "ALLES OK" melden.
+
+### 8. HDRMs muessen aufgehen
+
+Vom Nutzer am 19.11.2026: "es MUSS sich oeffnen".
+
+- Jedes HDRM wird so oft angefahren, bis es offen ist
+  (`System::updateHdrm`). "Offen" = mindestens `HDRM_OPEN_MIN_DEG` (140 Grad)
+  in Oeffnungsrichtung, nicht die vollen 165 - ein paar Grad zu wenig duerfen
+  den Arm nicht blockieren (Nutzer). Wiederholt wird nach jedem Fehlversuch mit Wackeln im
+  Getriebespiel (`MotorHAL::wiggle`). Schliessen in DESCENT genauso.
+- Der Arm faehrt erst, wenn BEIDE offen sind (`FLIGHT_HDRM_OPEN_OK`).
+- Ein HDRM darf den Arm aber NIE dauerhaft blockieren ("Hauptsache es geht auf
+  und der Arm startet", auch wenn dabei etwas kaputtgeht): Neustart mitten im
+  Oeffnen -> ab aktueller Position weiter oeffnen, nach 3 Versuchen gilt es als
+  offen. Encoder zaehlt nicht / fehlt -> auf Zeit fahren und als offen werten.
+  Ohne Motor -> gilt als offen.
+- NUR wenn ein HDRM so ohne Encoder-Beweis als offen gilt (`hdrm_blind_`):
+  Arm-Trajektorie abbrechen und Arm stoppen, sobald ein antwortendes Gelenk
+  `ARM_BLIND_STUCK_MS` (2 s) nicht vorankommt (Klappe vermutlich im Weg).
+  Sonst gilt die normale Logik des Flug-Players (warten, dann weiterfahren).
+- Der Boot-Guard schaltet den Arm NIE ab, auch nicht nach einem Haenger in
+  der Arm-UART.
+- Zeitvergleiche immer vorzeichenbehaftet (`static_cast<int32_t>(a - b)`),
+  wenn eine der Zeiten aus `millis()` spaeter im Loop stammt als `now` -
+  sonst wird die Differenz "negativ" = riesig (Fehler vom 19.11.2026: die
+  30-s-Motorgrenze stoppte jede gerade gestartete HDRM-Fahrt).

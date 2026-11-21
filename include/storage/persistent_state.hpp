@@ -23,6 +23,8 @@
  *   14    ~arm_enable
  *   15..18 arm_step A  - Schritt der Flug-Trajektorie + Pruefwert (je uint16)
  *   19..22 arm_step B  - zweites Fach, abwechselnd beschrieben
+ *   23    hdrm_blind   - Bit i = HDRM i+1 ohne Encoder-Bestaetigung "offen"
+ *   24    ~hdrm_blind
  *
  * Jeder Wert hat ein invertiertes Pruefbyte. Ein ungueltiger Wert (nie
  * beschrieben, Stromausfall mitten im Schreiben) liest sich als 0.
@@ -43,6 +45,8 @@ static constexpr uint8_t FLIGHT_HDRM_CLOSED = 0x02;   ///< beide HDRMs: Schliess
 static constexpr uint8_t FLIGHT_ARM_STARTED = 0x04;
 /// Flug-Trajektorie fertig - laeuft nie ein zweites Mal.
 static constexpr uint8_t FLIGHT_ARM_DONE    = 0x08;
+/// Beide HDRMs NACHWEISLICH offen (Encoder am Ziel) - erst dann faehrt der Arm.
+static constexpr uint8_t FLIGHT_HDRM_OPEN_OK = 0x80;
 
 /// Bits in flight_flags: dieses REXUS-Signal lag bei der Rueckkehr nach
 /// PRE_LAUNCH noch an und zaehlt erst wieder, nachdem es einmal abgefallen ist
@@ -76,6 +80,11 @@ public:
     /// FLIGHT_*-Bits (0, wenn ungueltig).
     uint8_t loadFlightFlags() const;
     void saveFlightFlags(uint8_t flags);
+
+    /// HDRMs, die nur auf Zeit / ohne Motor als offen gelten (Bit 0 = HDRM 1).
+    /// Dann bricht der Arm ab, wenn er nicht vorankommt. 0, wenn ungueltig.
+    uint8_t loadHdrmBlind() const;
+    void saveHdrmBlind(uint8_t mask);
 
     /// Flug-Schalter des Roboterarms (ARM_FLIGHT_ENABLE). false, wenn ungueltig.
     bool loadArmFlightEnable() const;

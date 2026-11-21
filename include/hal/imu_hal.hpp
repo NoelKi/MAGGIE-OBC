@@ -20,6 +20,9 @@ struct IMUReading {
     int16_t raw_gyro_x;
     int16_t raw_gyro_y;
     int16_t raw_gyro_z;
+    /// Chiptemperatur, 11 Bit vorzeichenbehaftet: T [Grad C] = raw_temp * 0,125 + 23
+    /// (BMI088 Datenblatt 5.3.7). Der Sensor aktualisiert sie alle 1,28 s.
+    int16_t raw_temp;
     uint32_t timestamp;
     bool valid;
 };

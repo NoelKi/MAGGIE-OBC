@@ -16,6 +16,8 @@ static constexpr int     ADDR_ARM_ENABLE_INV = 14;
 // Fach kaputt, das andere hoechstens 1 s alt.
 static constexpr int     ADDR_ARM_STEP_A     = 15;   // 15..18
 static constexpr int     ADDR_ARM_STEP_B     = 19;   // 19..22
+static constexpr int     ADDR_HDRM_BLIND     = 23;
+static constexpr int     ADDR_HDRM_BLIND_INV = 24;
 static constexpr uint8_t MAGIC           = 0x4D;   // 'M'
 
 void PersistentState::begin() {
@@ -83,6 +85,17 @@ bool PersistentState::loadArmFlightEnable() const {
     // Nur genau 0x01 mit passendem Pruefbyte zaehlt als "an" - alles andere
     // (nie beschrieben, halb geschrieben) ist "aus".
     return static_cast<uint8_t>(~v) == inv && v == 0x01;
+}
+
+uint8_t PersistentState::loadHdrmBlind() const {
+    const uint8_t v   = EEPROM.read(ADDR_HDRM_BLIND);
+    const uint8_t inv = EEPROM.read(ADDR_HDRM_BLIND_INV);
+    return static_cast<uint8_t>(~v) == inv ? v : 0;
+}
+
+void PersistentState::saveHdrmBlind(uint8_t mask) {
+    EEPROM.update(ADDR_HDRM_BLIND, mask);
+    EEPROM.update(ADDR_HDRM_BLIND_INV, static_cast<uint8_t>(~mask));
 }
 
 void PersistentState::saveArmFlightEnable(bool enabled) {

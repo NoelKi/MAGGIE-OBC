@@ -37,7 +37,8 @@
  *   IMU/ACCEL:   [ax_hi ax_lo ay_hi ay_lo az_hi az_lo  0 0]  (int16 sensor counts)
  *   IMU/GYRO :   [gx_hi gx_lo gy_hi gy_lo gz_hi gz_lo  0 0]  (int16 sensor counts)
  *   MOTOR/STATE: [pos(int32 BE) speed(int16 BE) state(uint8) 0]  (Encoder-Counts, PWM, Bits)
- *   SYS/STATE:   [state(uint8) subsys(uint8) uptime_ms(uint32 BE) 0 0]
+ *   SYS/STATE:   [state(uint8) subsys(uint8) uptime_ms(uint32 BE) rexus flight]
+ *                STATUS2 = DL_LIVE_* (laeuft Arm/SD/..., Kameras), flight = DL_FLIGHT_*
  *   FORCE/TARGET1: [c0 c1 c2 0]      (3x int16: X, Y, Z)
  *   FORCE/TARGET2: [c0 c1 c2 c3]     (4x int16: A, B, C, D)
  *                  je int16 = TARIERTE HX711-Counts / FORCE_TELE_DIV
@@ -118,11 +119,12 @@ static constexpr bool UPLINK_RX_INVERTED = false;
 // Frame geometry
 static constexpr uint8_t DOWNLINK_FRAME_SIZE = 20;
 
-/// Hoechstens so viele Byte normaler Sensordaten (IMU, Kraft, Motor) duerfen in
-/// der UART-Warteschlange stehen - 120 Byte sind bei 38400 Baud ~31 ms. Bei
-/// hoeherer Baudrate entsprechend groesser waehlen. SYS-Frames haben Vorrang
-/// und nutzen den ganzen Puffer (siehe sendFrame).
-static constexpr int DOWNLINK_NORMAL_QUEUE_MAX = 120;
+/// Downlink-Stufen (Nutzer, 19.11.2026) - Grenzen in data_rates.hpp.
+enum class DownlinkPrio : uint8_t {
+    STATUS = 0,   ///< alle SYS-Frames: Zustand, HDRM, Arm/Kameras/Sensoren an
+    MOTION = 1,   ///< ARM/JOINT: sieht man, dass der Arm sich bewegt?
+    BULK   = 2,   ///< alles andere (Sensordaten)
+};
 static constexpr uint8_t DOWNLINK_DATA_SIZE  = 8;
 
 // Frame markers
@@ -136,12 +138,7 @@ enum class DownlinkSubsystem : uint8_t {
     SYS   = 0x03,
     FORCE = 0x04,
     ARM   = 0x05,   ///< Roboterarm, durchgereicht von der RCU (arm_hal.hpp)
-    EVENT = 0x10,   ///< NUR SD-Karte - geht nie ueber die UART (siehe logEvent)
-};
-
-// MSGID2 - message type for the EVENT subsystem (SD only)
-enum class DownlinkEventMsg : uint8_t {
-    STATE = 0x01,   ///< Zustand oder REXUS-Signal hat sich geaendert
+    // 0x10 war EVENT (nur SD-Karte) - reserviert, Ereignisse stehen jetzt in EVENTS.csv
 };
 
 // MSGID2 - message type for the IMU subsystem
@@ -181,6 +178,8 @@ enum class DownlinkSysMsg : uint8_t {
     ARM_FLIGHT = 0x06,   ///< Status der Flug-Trajektorie (ArmFlightPlayer) + Freigabe
     CAMERA     = 0x07,   ///< Status der 4 Kameras (CameraHAL)
     CAMERA_INFO = 0x08,  ///< Geraeteinfo EINER Kamera (reihum, 1 Hz)
+    SD         = 0x09,   ///< Zustand des Bordspeichers (SdLogger)
+    BOOT       = 0x0A,   ///< Start-/Watchdog-Diagnose (boot_guard.hpp)
 };
 
 // SYS/CAMERA - Flags je Kamera (DATA[0..3] = Kamera 1..4)
@@ -243,6 +242,22 @@ static constexpr uint8_t DL_SUBSYS_DOWNLINK = 0x04;  ///< bit2: Downlink-UART of
 static constexpr uint8_t DL_SUBSYS_FORCE1   = 0x08;  ///< bit3: Kraftsensor 1 initialisiert
 static constexpr uint8_t DL_SUBSYS_FORCE2   = 0x10;  ///< bit4: Kraftsensor 2 initialisiert
 static constexpr uint8_t DL_SUBSYS_MOTOR2   = 0x20;  ///< bit5: Motor 2 + Encoder initialisiert
+
+// SYS/STATE DATA[7] - Flugablauf (HDRM, Arm). Aus den FLIGHT_*-Bits im EEPROM.
+static constexpr uint8_t DL_FLIGHT_HDRM_OPENING = 0x01;  ///< Oeffnen begonnen
+static constexpr uint8_t DL_FLIGHT_HDRM_OPEN    = 0x02;  ///< beide HDRMs offen (Fahrt fertig)
+static constexpr uint8_t DL_FLIGHT_HDRM_CLOSING = 0x04;  ///< Schliessen begonnen (DESCENT)
+static constexpr uint8_t DL_FLIGHT_ARM_STARTED  = 0x08;  ///< Flug-Trajektorie gestartet
+static constexpr uint8_t DL_FLIGHT_ARM_DONE     = 0x10;  ///< Flug-Trajektorie fertig
+static constexpr uint8_t DL_FLIGHT_ARM_MOVING   = 0x20;  ///< Flug-Trajektorie laeuft gerade
+static constexpr uint8_t DL_FLIGHT_HDRM_BLIND   = 0x40;  ///< ein HDRM nur auf Zeit offen (kein Encoder-Beweis)
+
+// SYS/STATE STATUS2 - was laeuft gerade (live, nicht nur "initialisiert")
+static constexpr uint8_t DL_LIVE_ARM_LINK   = 0x01;  ///< RCU antwortet
+static constexpr uint8_t DL_LIVE_SD         = 0x02;  ///< SD-Karte schreibt
+static constexpr uint8_t DL_LIVE_FLIGHT_SW  = 0x04;  ///< Flug-Schalter Arm an
+static constexpr uint8_t DL_LIVE_MINIMAL    = 0x08;  ///< Minimalmodus (Boot-Guard)
+static constexpr uint8_t DL_LIVE_CAM_SHIFT  = 4;     ///< Bits 4..7: Kamera 1..4 antwortet
 
 class TelemetryDownlink {
 public:
@@ -314,7 +329,8 @@ public:
      *              offene Leitung die Flugsequenz ausloest.
      */
     void sendSystem(uint8_t mission_state, uint8_t subsystems, uint32_t uptime_ms,
-                    uint8_t status1 = 0, uint8_t status2 = 0, uint8_t rexus = 0);
+                    uint8_t status1 = 0, uint8_t status2 = 0, uint8_t rexus = 0,
+                    uint8_t flight = 0);
 
     /**
      * @brief Empfangsstatistik des Uplinks senden (SYS/UPLINK).
@@ -397,36 +413,39 @@ public:
     void sendCameraInfo(uint8_t cam, uint8_t protocol, uint16_t features, uint16_t probes_failed);
 
     /**
-     * @brief Ereignis-Frame NUR fuer die SD-Karte (EVENT/STATE).
+     * @brief SYS/SD: Zustand des Bordspeichers.
      *
-     * Zustandswechsel und REXUS-Flanken auf die Millisekunde - der Downlink
-     * kennt sie nur aus dem 1-Hz-SYS-Frame. Geht ausschliesslich an den Tap,
-     * nie ueber die UART, und zaehlt den Frame-Zaehler NICHT hoch (sonst saehe
-     * der Boden Luecken, die keine sind).
-     *
-     * DATA: [state prev_state signals prev_signals millis(uint32 BE)]
-     *       signals = entprellte, interpretierte REXUS-Signale (Bit 0 LO,
-     *       Bit 1 SOE, Bit 2 SODS - wie DL_REXUS_*, aber 1 = liegt an).
+     * DATA: [status(SdLogStatus) fail(SdLogFail) written_kb(uint32 BE) dropped(uint16 BE, gesaettigt)]
+     * STATUS1 = Fuellstand des RAM-Puffers in %, STATUS2 = 0.
      */
-    void logEvent(uint8_t state, uint8_t prev_state, uint8_t signals,
-                  uint8_t prev_signals, uint32_t millis_now);
-
-    /// Frames, die wegen voller UART nur auf der SD-Karte gelandet sind.
-    uint32_t uartDropped() const { return uart_dropped_; }
+    void sendSd(uint8_t status, uint8_t fail, uint32_t written_kb, uint32_t dropped,
+                uint8_t fill_pct);
 
     /**
-     * @brief Mithoerer fuer gesendete Frames (z.B. der SD-Bordspeicher).
+     * @brief SYS/BOOT: Start- und Watchdog-Diagnose (boot_guard.hpp).
      *
-     * Bekommt jedes Frame NACH dem Senden, byte-identisch. Aendert nichts an
-     * dem, was ueber die Leitung geht.
+     * DATA: [boot_count(uint16 BE) resets_in_row culprit_stage disabled_mask
+     *        minimal_mode loop_max(uint16 BE, 0,1 ms, gesaettigt)]
+     * STATUS1 = 1 wenn der letzte Reset ein Watchdog-Reset war,
+     * STATUS2 = Downlink-Frames, die seit dem letzten SYS/BOOT verworfen
+     *           wurden (gesaettigt auf 255).
      */
-    using FrameTap = void (*)(void* ctx, const uint8_t* frame, uint8_t len);
-    void setTap(FrameTap tap, void* ctx) { tap_ = tap; tap_ctx_ = ctx; }
+    void sendBoot(uint16_t boot_count, uint8_t resets_in_row, uint8_t culprit,
+                  uint8_t disabled_mask, bool minimal, uint32_t loop_max_us,
+                  bool after_watchdog);
+
+    /// Frames, die wegen voller UART nicht gesendet wurden (alle Stufen).
+    uint32_t uartDropped() const { return uart_dropped_; }
+    /// ... davon je Stufe (DownlinkPrio). STATUS sollte immer 0 bleiben.
+    uint32_t uartDropped(DownlinkPrio p) const { return dropped_prio_[static_cast<uint8_t>(p)]; }
+
+    /// Stufe eines Frames.
+    static DownlinkPrio prioOf(uint8_t msgid1, uint8_t msgid2);
 
 private:
     HardwareSerial& serial_;
-    FrameTap tap_     = nullptr;
-    void*    tap_ctx_ = nullptr;
+    uint32_t uart_dropped_reported_ = 0;
+    uint32_t dropped_prio_[3] = {};
     uint16_t counter_ = 0;
     bool initialized_ = false;
     uint32_t uart_dropped_ = 0;
@@ -438,7 +457,7 @@ private:
      */
     void sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
                    const uint8_t data[DOWNLINK_DATA_SIZE],
-                   uint8_t status1, uint8_t status2, bool sd_only = false);
+                   uint8_t status1, uint8_t status2);
 
     /// CRC-8, polynomial 0x07, init 0x00 (SMBus/CCITT style)
     static uint8_t crc8(const uint8_t* data, size_t len);

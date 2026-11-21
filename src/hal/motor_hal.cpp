@@ -1,4 +1,5 @@
 #include "hal/motor_hal.hpp"
+#include "obc_log.hpp"
 
 bool MotorHAL::pinHasHardwarePwm(uint8_t pin) {
     // Teensy-4.1-Pins ohne FlexPWM-/QuadTimer-Kanal. Ermittelt aus
@@ -15,7 +16,7 @@ bool MotorHAL::pinHasHardwarePwm(uint8_t pin) {
 }
 
 void MotorHAL::logDriveProfile() {
-    Serial.printf("INFO  [MotorHAL]: Fahrprofil (sanfte Anfahrt): Kick %d fuer %lu ms, "
+    Log.printf("INFO  [MotorHAL]: Fahrprofil (sanfte Anfahrt): Kick %d fuer %lu ms, "
                   "Rampe quadratisch %d -> %d am Ziel.\n",
                   KICK_SPEED, static_cast<unsigned long>(KICK_MS),
                   RAMP_START_SPEED, SOFT_APPROACH_CRUISE_SPEED);
@@ -161,6 +162,7 @@ void MotorHAL::on(int16_t speed) {
 void MotorHAL::off() {
     turning_ = false;
     kicking_ = false;
+    wiggling_ = false;
     is_on_   = false;
     brake();
 }
@@ -192,7 +194,7 @@ void MotorHAL::goTo(int16_t degrees) {
     // Motor um den Zielpunkt herum pendeln lassen - die Fahrt stoppt ja erst
     // NACH dem Ueberschreiten des Ziels, steht also immer ein Stueck dahinter.
     if (labs(target - pos) <= POS_DEADBAND) {
-        Serial.printf("INFO  [MotorHAL]: Position %ld schon im Zielfenster "
+        Log.printf("INFO  [MotorHAL]: Position %ld schon im Zielfenster "
                       "(%ld +/- %ld Counts) - keine Fahrt.\n",
                       pos, target, POS_DEADBAND);
         return;
@@ -227,14 +229,46 @@ void MotorHAL::startMove(long target, int16_t degrees, const char* kind) {
     if (turn_moving_) startForward();
     else              startRunup(start);
 
-    Serial.printf("INFO  [MotorHAL]: Fahrt %s %d Grad - Start %ld, Ziel %ld "
+    Log.printf("INFO  [MotorHAL]: Fahrt %s %d Grad - Start %ld, Ziel %ld "
                   "(%ld Counts).\n",
                   kind, degrees, turn_start_, turn_target_, target - start);
 }
 
 void MotorHAL::update() {
     updateTurn();
+    updateWiggle();
     updateBrake();
+}
+
+void MotorHAL::moveTo(long target_counts) {
+    if (!enc_) return;
+    const long pos = enc_->read();
+    const int16_t deg = static_cast<int16_t>((target_counts - pos) * 360 / COUNTS_PER_REV);
+    startMove(target_counts, deg, "auf Ziel");
+}
+
+void MotorHAL::wiggle() {
+    if (!initialized_) return;
+    turning_     = false;
+    kicking_     = false;
+    is_on_       = true;      // zaehlt als laufender Motor (keine SD-/Flash-Zugriffe)
+    wiggling_    = true;
+    wiggle_step_ = 0;
+    wiggle_ms_   = millis();
+    setSpeed(KICK_SPEED);
+    Log.printf("INFO  [MotorHAL]: Motor %u wackelt im Getriebespiel (%u x %lu ms).\n",
+               motor_id_, WIGGLE_PULSES, static_cast<unsigned long>(WIGGLE_PULSE_MS));
+}
+
+void MotorHAL::updateWiggle() {
+    if (!wiggling_) return;
+    if (static_cast<int32_t>(millis() - wiggle_ms_) < static_cast<int32_t>(WIGGLE_PULSE_MS)) return;
+    wiggle_ms_ = millis();
+    if (++wiggle_step_ >= WIGGLE_PULSES) {
+        off();   // bremst, wiggling_ = false
+        return;
+    }
+    setSpeed((wiggle_step_ & 1) ? -KICK_SPEED : KICK_SPEED);
 }
 
 void MotorHAL::startRunup(long pos) {
@@ -319,7 +353,7 @@ bool MotorHAL::updateBreakaway(long pos) {
     if (turn_dir_ * (pos - turn_ref_pos_) >= TURN_MIN_COUNTS) {
         turn_moving_ = true;
         if (breakaway_tries_ > 1) {
-            Serial.printf("INFO  [MotorHAL]: Motor %u erst im %u. Anlauf losgekommen.\n",
+            Log.printf("INFO  [MotorHAL]: Motor %u erst im %u. Anlauf losgekommen.\n",
                           motor_id_, breakaway_tries_);
         }
         return false;
@@ -330,15 +364,15 @@ bool MotorHAL::updateBreakaway(long pos) {
     if (breakaway_tries_ >= BREAKAWAY_TRIES) {
         off();
         turn_failed_ = true;
-        Serial.printf("WARN  [MotorHAL]: Motor %u laeuft nicht an - %u Anlaeufe ohne "
+        Log.printf("WARN  [MotorHAL]: Motor %u laeuft nicht an - %u Anlaeufe ohne "
                       "Erfolg, Fahrt abgebrochen (Position %ld, Ziel %ld).\n",
                       motor_id_, BREAKAWAY_TRIES, pos, turn_target_);
-        Serial.println("WARN  [MotorHAL]: Mechanik fest, Strombegrenzung (ILIM) zu "
+        Log.println("WARN  [MotorHAL]: Mechanik fest, Strombegrenzung (ILIM) zu "
                        "niedrig, Versorgung bricht ein, oder Encoder zaehlt nicht.");
         return true;
     }
 
-    Serial.printf("INFO  [MotorHAL]: Motor %u steht - Anlauf %u/%u.\n",
+    Log.printf("INFO  [MotorHAL]: Motor %u steht - Anlauf %u/%u.\n",
                   motor_id_, breakaway_tries_ + 1, BREAKAWAY_TRIES);
     startRunup(pos);
     return true;
@@ -394,7 +428,7 @@ void MotorHAL::updateTurn() {
             // KEIN Fehler: In der Anfahrzone ist "kein Fortschritt mehr" das
             // ERWARTETE Ergebnis - Kontakt/Anschlag statt Encoder-Ziel. Deshalb
             // bleibt turn_failed_ false.
-            Serial.printf(
+            Log.printf(
                 "INFO  [MotorHAL]: Sanfte Anfahrt beendet (Kontakt/Anschlag) - "
                 "Position %ld (Ziel %ld, Rest %ld Counts).\n",
                 pos, turn_target_, remaining);
@@ -402,12 +436,12 @@ void MotorHAL::updateTurn() {
         }
 
         turn_failed_ = true;
-        Serial.printf(
+        Log.printf(
             "WARN  [MotorHAL]: Drehung abgebrochen - in %lu ms nur %ld Counts "
             "in Fahrtrichtung. Position %ld (Start %ld, Ziel %ld, PWM %d).\n",
             static_cast<unsigned long>(stall_ms), progress,
             pos, turn_start_, turn_target_, current_speed_);
-        Serial.println(
+        Log.println(
             "WARN  [MotorHAL]: Position unveraendert -> Encoder zaehlt nicht "
             "(Verdrahtung/Pins pruefen). Position laeuft weg -> Encoder-Kanaele "
             "A/B vertauscht. Mechanik fest -> Motor blockiert.");
@@ -418,7 +452,7 @@ void MotorHAL::updateTurn() {
     // Gedreht = tatsaechlich zurueckgelegte Counts. Weicht der Wert deutlich vom
     // Sollbetrag ab, stimmt COUNTS_PER_REV nicht - genau der Vergleich, den man
     // zum Kalibrieren braucht.
-    Serial.printf("INFO  [MotorHAL]: Drehung beendet - Position %ld (Ziel %ld, "
+    Log.printf("INFO  [MotorHAL]: Drehung beendet - Position %ld (Ziel %ld, "
                   "gedreht %ld Counts = %.1f Grad bei COUNTS_PER_REV=%ld).\n",
                   pos, turn_target_, pos - turn_start_,
                   static_cast<double>(pos - turn_start_) * 360.0 / COUNTS_PER_REV,

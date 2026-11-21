@@ -177,6 +177,27 @@ public:
     void goTo(int16_t degrees);
 
     /**
+     * @brief Faehrt auf eine ABSOLUTE Encoder-Position (Counts) - fuer die
+     *        HDRM-Wiederholungen, die immer dasselbe Ziel anfahren muessen.
+     *
+     * Gleiche Fahrt wie turnBy()/goTo() (Anlauf, Kick, sanfte Anfahrt). Kein
+     * Totband: Ob das Ziel schon erreicht ist, entscheidet der Aufrufer.
+     */
+    void moveTo(long target_counts);
+
+    /**
+     * @brief Im Getriebespiel wackeln, um eine festsitzende Mechanik zu loesen.
+     *
+     * WIGGLE_PULSES kurze Stoesse mit voller PWM, abwechselnd vor und zurueck
+     * (je WIGGLE_PULSE_MS - bei 380:1 nur wenige Grad am Abtrieb), danach
+     * Bremsen. Laeuft nicht blockierend in update(); isBusy() ist so lange true.
+     */
+    void wiggle();
+    bool isWiggling() const { return wiggling_; }
+    /// Fahrt oder Wackeln laeuft.
+    bool isBusy() const { return turning_ || wiggling_; }
+
+    /**
      * @brief Zyklische Pflege - muss jeden Loop aufgerufen werden.
      *
      * Schaltet eine laufende Fahrt am Ziel ab (siehe turnBy/goTo) und beendet
@@ -227,6 +248,12 @@ private:
     long turn_start_  = 0;     ///< Position beim Start dieser Fahrt
     long turn_target_ = 0;     ///< absolute Zielposition dieser Fahrt in Counts
     bool turn_failed_ = false; ///< letzte Fahrt wurde abgebrochen
+    bool     wiggling_     = false;  ///< wiggle() laeuft
+    uint8_t  wiggle_step_  = 0;
+    uint32_t wiggle_ms_    = 0;
+    static constexpr uint8_t  WIGGLE_PULSES   = 6;
+    static constexpr uint32_t WIGGLE_PULSE_MS = 80;
+    void updateWiggle();
 
     // Ueberwachung der laufenden Fahrt, siehe updateTurn().
     uint32_t turn_ref_ms_  = 0;  ///< Beginn des aktuellen Fortschrittsfensters

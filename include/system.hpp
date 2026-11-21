@@ -96,13 +96,44 @@ private:
     uint8_t  flight_flags_      = 0;   ///< FLIGHT_*-Bits, gespiegelt im EEPROM
     uint16_t last_checkpoint_s_ = 0;   ///< zuletzt gesicherte Flugzeit in s
 
-    /// Eine geplante HDRM-Fahrt. HDRM 2 startet HDRM_STAGGER_MS nach HDRM 1.
-    struct HdrmMove {
-        bool     pending = false;
-        uint32_t due_ms  = 0;
-        int16_t  degrees = 0;
+    /// Ein HDRM oeffnen/schliessen - so oft, bis der Encoder das Ziel meldet
+    /// (Nutzer, 19.11.2026: "es MUSS sich oeffnen"). Nach jedem Fehlversuch
+    /// wackelt der Motor im Getriebespiel, dann kommt der naechste Versuch.
+    struct HdrmCtl {
+        enum class Phase : uint8_t { IDLE, WAIT, MOVING, WIGGLE, OPEN_LOOP, DONE };
+        Phase    phase    = Phase::IDLE;
+        bool     open     = true;   ///< Ziel offen (true) oder zu
+        bool     blind    = false;  ///< Ausgangslage unbekannt (Neustart mitten im Ablauf)
+        long     target   = 0;      ///< Encoder-Ziel in Counts
+        long     ref_pos  = 0;      ///< Bezug fuer "wie weit gedreht"
+        long     try_pos  = 0;      ///< Position zu Beginn des laufenden Versuchs
+        uint32_t next_ms  = 0;      ///< naechster Versuch fruehestens / Ende OPEN_LOOP
+        uint16_t attempts = 0;
+        uint8_t  no_move  = 0;      ///< Versuche in Folge ohne jede Encoder-Bewegung
     };
-    HdrmMove hdrm_move_[2];            ///< [0] = HDRM 1 (motor_), [1] = HDRM 2 (motor2_)
+    HdrmCtl hdrm_[2];                  ///< [0] = HDRM 1 (motor_), [1] = HDRM 2 (motor2_)
+    long    hdrm_closed_pos_[2] = {};  ///< Encoder-Position "zu" (Start des Oeffnens)
+    /// Bit i = HDRM i+1 gilt nur auf Zeit / ohne Motor als offen (kein Encoder-
+    /// Beweis). Dann wird die Arm-Trajektorie abgebrochen, sobald der Arm
+    /// ARM_BLIND_STUCK_MS lang nicht vorankommt (Nutzer, 19.11.2026). Im EEPROM.
+    uint8_t hdrm_blind_ = 0;
+    uint32_t arm_stuck_since_ms_ = 0;          ///< 0 = Arm kommt voran
+    static constexpr uint32_t ARM_BLIND_STUCK_MS = 2000;
+    bool    hdrm_closed_known_[2] = {};///< false nach einem Neustart mitten im Flug
+
+    /// Nach einem Neustart mitten im Oeffnen (Lage unbekannt): spaetestens nach
+    /// so vielen Versuchen gilt das HDRM als offen - der Arm soll starten.
+    static constexpr uint8_t  HDRM_BLIND_MAX_ATTEMPTS = 3;
+    /// So viele Versuche in Folge ohne jede Encoder-Bewegung = Encoder tot
+    /// (oder Mechanik fest): dann einmal auf Zeit fahren und als fertig werten.
+    static constexpr uint8_t  HDRM_ENCODER_DEAD_TRIES = 3;
+    static constexpr long     HDRM_NO_MOVE_COUNTS     = 20;
+    /// Fahrt auf Zeit ohne Encoder: Motor 1 brauchte 1,1 s fuer 165 Grad.
+    static constexpr uint32_t HDRM_OPEN_LOOP_MS    = 1500;
+    static constexpr int16_t  HDRM_OPEN_LOOP_SPEED = 220;
+    /// Pause vor Versuch n: n x HDRM_RETRY_PAUSE_MS, hoechstens HDRM_RETRY_PAUSE_MAX_MS.
+    static constexpr uint32_t HDRM_RETRY_PAUSE_MS     = 500;
+    static constexpr uint32_t HDRM_RETRY_PAUSE_MAX_MS = 3000;
 
     uint32_t last_telemetry_ms_ = 0;        ///< Zeitstempel des letzten IMU-Frames
     uint32_t last_motor_telemetry_ms_ = 0;  ///< Zeitstempel der letzten Motor-Frames
@@ -111,6 +142,22 @@ private:
     uint32_t last_arm_joint_ms_ = 0;        ///< Zeitstempel der letzten ARM/JOINT-Runde
     uint32_t last_arm_imu_ms_ = 0;          ///< Zeitstempel der letzten RCU-IMU-Frames
     uint32_t last_arm_power_ms_ = 0;        ///< Zeitstempel der letzten Spannungs-/Temperatur-Runde
+    uint32_t last_sd_motor_ms_ = 0;         ///< Zeitstempel der letzten Motor-Zeile auf der SD-Karte
+    uint32_t last_dl_imu_ms_ = 0;           ///< Zeitstempel des letzten IMU-Frames im Downlink
+    uint32_t last_status_ms_ = 0;           ///< Zeitstempel des letzten SYS/STATE-Frames
+    uint32_t last_diag_ms_ = 0;             ///< Zeitstempel des letzten Diagnose-Slots
+    uint8_t  diag_slot_ = 0;                ///< naechster Diagnose-Slot (sendDiagFrame)
+    static constexpr uint8_t DIAG_SLOTS = 8; ///< Diagnose-Frames reihum, je 1x pro SYS_INTERVAL_MS
+    uint8_t  arm_power_step_ = 0;           ///< Spannung/Temperatur reihum: Gelenk = step/2 + 1
+    uint8_t  arm_joint_next_ = 1;           ///< naechstes Gelenk fuer ARM/JOINT
+    uint32_t last_loop_max_us_ = 0;         ///< Loop-Maximum der letzten SYS-Periode
+    uint32_t last_arm_report_ms_ = 0;       ///< Arm-UART-Zusammenfassung im Log
+    uint32_t arm_report_ok_ = 0, arm_report_crc_ = 0, arm_report_id_ = 0;
+
+    // Loop-Statistik je SYS-Periode (SYS.csv, SYS/BOOT)
+    uint32_t loop_max_us_ = 0;
+    uint32_t loop_count_ = 0;
+    uint32_t loop_stats_since_ms_ = 0;
 
     // -----------------------------------------------------------------------
     // Roboterarm
@@ -176,7 +223,8 @@ private:
     // getrennten Taktleitungen und wandeln unabhaengig voneinander.
     struct ForceChannelState {
         ForceReading last{};                ///< letzter gelesener Messwert (0 vor dem ersten)
-        uint32_t last_tx_ms = 0;            ///< Zeitstempel des letzten FORCE-Frames
+        uint32_t last_tx_ms = 0;            ///< Zeitstempel des letzten Werts (SD, STALE-Takt)
+        uint32_t last_dl_ms = 0;            ///< Zeitstempel des letzten FORCE-Frames im Downlink
     };
     ForceChannelState force1_state_;
     ForceChannelState force2_state_;
@@ -208,6 +256,25 @@ private:
     static void logForceSensor(ForceHAL* hal, const char* label,
                                const uint8_t* pins, uint8_t count, uint8_t sck);
     void handleSystemTelemetry(uint32_t now_ms);
+    /// Stufe 1: SYS/STATE mit Zustand, HDRM, Arm/SD/Kameras live (2 Hz + bei Wechsel).
+    void sendStatusFrame(uint32_t now_ms);
+    /// Stufe 1: ein Diagnose-Slot (Uplink, Arm-Link, Arm, Kameras, SD, Boot) reihum.
+    void sendDiagFrame(uint32_t now_ms);
+    /// Alle 10 s: Arm-UART ok / CRC-Fehler / unbekannte ID ins Log.
+    void reportArmLink(uint32_t now_ms);
+    /// 1-Hz-Zeile fuer SYS.csv und je Kamera eine Zeile fuer CAMERA.csv.
+    void logSystemToSd(uint32_t now_ms, uint8_t rexus_bits, uint32_t loop_max_us,
+                       uint32_t loops_per_s);
+    /// Motorzustand fuer MOTOR.csv (Takt SD_MOTOR_INTERVAL_MS).
+    void logMotorToSd(MotorHAL* motor, bool ready, uint8_t number);
+    /// DL_MOTOR_STATE_*-Bits eines Motors.
+    static uint8_t motorStateBits(MotorHAL* motor);
+    /// DL_CAM_*-Bits einer Kamera (0..3).
+    uint8_t cameraFlags(uint8_t cam, uint32_t now_ms) const;
+    /// Nach einem Watchdog-Reset: Schuldigen und Abgeschaltetes melden.
+    void logBootGuard();
+    /// Kopf von INFO.txt (Boot-Nr., Firmware, Reset-Grund).
+    void writeSdInfo(bool after_watchdog_reset);
     void handleStateMachine(uint32_t now_ms);
     /// Zustandswechsel seit dem letzten Aufruf uebernehmen (Speichern,
     /// Motoren, Meldung). Aus Telecommands UND aus update().
@@ -221,8 +288,12 @@ private:
 
     /// Aktionen des Flugablaufs: HDRM-Fahrten, Roboterarm, Motorsperre.
     void handleFlight(uint32_t now_ms);
-    /// Beide HDRM-Fahrten einplanen (HDRM 2 um HDRM_STAGGER_MS versetzt).
-    void scheduleHdrmMoves(uint32_t now_ms, int16_t degrees);
+    /// Beide HDRMs oeffnen bzw. schliessen (HDRM 2 um HDRM_STAGGER_MS versetzt).
+    void startHdrms(uint32_t now_ms, bool open, bool blind = false);
+    /// HDRM-Ablauf: Versuch starten, Ergebnis pruefen, wackeln, wiederholen.
+    void updateHdrm(uint8_t i, uint32_t now_ms);
+    /// Laufende HDRM-Ablaeufe abbrechen (Rueckkehr an den Boden, Flugbeginn).
+    void cancelHdrms();
     /// Schliessen fuer DESCENT einplanen, falls die HDRMs geoeffnet wurden.
     void planDescent(uint32_t now_ms);
     /// Ereignis-Frame (nur SD) mit aktuellem Zustand und Signalen schreiben.
@@ -231,7 +302,7 @@ private:
     static uint8_t eventSignals(uint8_t flight_bits);
     /// Aktuell anliegende REXUS-Signale als FLIGHT_IGNORE_*-Bits.
     uint8_t currentSignalBits() const;
-    /// Sind beide Oeffnungsfahrten begonnen UND beendet?
+    /// Sind beide HDRMs NACHWEISLICH offen (Encoder am Ziel)?
     bool hdrmsOpenDone() const;
     /// Flug-Trajektorie des Arms in ROBOT_ARM (Start) und DESCENT (nur
     /// Fortsetzen/Beenden). Freigabe: armFlightGateOpen().

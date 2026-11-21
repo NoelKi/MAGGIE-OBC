@@ -1,5 +1,6 @@
 #include "hal/telemetry_hal.hpp"
 #include <cstring>
+#include "data_rates.hpp"
 
 TelemetryDownlink::TelemetryDownlink(HardwareSerial& serial)
     : serial_(serial) {
@@ -56,7 +57,7 @@ uint8_t TelemetryDownlink::crc8(const uint8_t* data, size_t len) {
 
 void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
                                   const uint8_t data[DOWNLINK_DATA_SIZE],
-                                  uint8_t status1, uint8_t status2, bool sd_only) {
+                                  uint8_t status1, uint8_t status2) {
     if (!initialized_) return;
 
     uint8_t frame[DOWNLINK_FRAME_SIZE];
@@ -85,37 +86,52 @@ void TelemetryDownlink::sendFrame(uint8_t msgid1, uint8_t msgid2, uint8_t ack,
     frame[18] = crc8(&frame[1], 17);
     frame[19] = DL_END;
 
-    // SD-Karte bekommt jedes Frame.
-    if (tap_) tap_(tap_ctx_, frame, DOWNLINK_FRAME_SIZE);
-    if (sd_only) return;   // Ereignis-Frames: kein UART, kein Zaehler
-
-    // UART: nie blockieren (write() wuerde warten, bis Platz ist). Zwei Spuren:
-    //  - SYS-Frames (Zustand, REXUS-Signale) und ARM/JOINT: immer, sobald das
-    //    Frame passt. ARM/JOINT, weil die Gelenkwinkel sonst in der vollen
-    //    Leitung untergehen (Test 15.11.2026: kein einziges Frame in 5 min) -
-    //    hoechstens ARM_MAX_JOINTS x 5 Hz und nur bei neuem Wert, real ~200 B/s.
-    //  - Alles andere (IMU, Kraft, Motor): nur solange die Warteschlange kurz
-    //    ist (DOWNLINK_NORMAL_QUEUE_MAX). Sonst stuende ein SYS-Frame hinter
-    //    hunderten Byte Sensordaten an - und waere bei voller Leitung so oft
-    //    weg wie jedes andere Frame. Verworfenes fehlt nur im Downlink (der
-    //    Boden sieht eine Zaehler-Luecke), die SD-Karte hat es.
+    // UART: nie blockieren (write() wuerde warten, bis Platz ist). Drei
+    // Stufen (DownlinkPrio, Grenzen in data_rates.hpp):
+    //  1. STATUS: immer, solange das Frame in den Puffer passt.
+    //  2. MOTION (Gelenkwinkel): bis DL_MOTION_QUEUE_MAX in der Warteschlange,
+    //     laesst aber immer DL_STATUS_RESERVE fuer STATUS frei.
+    //  3. BULK (Sensordaten): nur bei kurzer Warteschlange
+    //     (DL_BULK_QUEUE_MAX) - sonst stuende ein STATUS-Frame hinter hunderten
+    //     Byte Sensordaten. Die Raten sind so gewaehlt, dass das selten greift.
+    // Verworfenes fehlt nur im Downlink (der Boden sieht eine Zaehler-Luecke).
     const int free_bytes = serial_.availableForWrite();
     if (free_bytes > tx_capacity_) tx_capacity_ = free_bytes;   // leerer Puffer = Kapazitaet
     const int queued = tx_capacity_ - free_bytes;
-    const bool priority =
-        msgid1 == static_cast<uint8_t>(DownlinkSubsystem::SYS) ||
-        (msgid1 == static_cast<uint8_t>(DownlinkSubsystem::ARM) &&
-         msgid2 == static_cast<uint8_t>(DownlinkArmMsg::JOINT));
+    const DownlinkPrio prio = prioOf(msgid1, msgid2);
 
-    const bool send = priority
-        ? free_bytes >= DOWNLINK_FRAME_SIZE
-        : queued + DOWNLINK_FRAME_SIZE <= DOWNLINK_NORMAL_QUEUE_MAX;
+    bool send = false;
+    switch (prio) {
+        case DownlinkPrio::STATUS:
+            send = free_bytes >= DOWNLINK_FRAME_SIZE;
+            break;
+        case DownlinkPrio::MOTION: {
+            int limit = rates::DL_MOTION_QUEUE_MAX;
+            if (limit > tx_capacity_ - rates::DL_STATUS_RESERVE) limit = tx_capacity_ - rates::DL_STATUS_RESERVE;
+            send = queued + DOWNLINK_FRAME_SIZE <= limit;
+            break;
+        }
+        case DownlinkPrio::BULK: {
+            int limit = rates::DL_BULK_QUEUE_MAX;
+            if (limit > tx_capacity_ - rates::DL_STATUS_RESERVE) limit = tx_capacity_ - rates::DL_STATUS_RESERVE;
+            send = queued + DOWNLINK_FRAME_SIZE <= limit;
+            break;
+        }
+    }
     if (send) {
         serial_.write(frame, DOWNLINK_FRAME_SIZE);
     } else {
         uart_dropped_++;
+        dropped_prio_[static_cast<uint8_t>(prio)]++;
     }
     counter_++;
+}
+
+DownlinkPrio TelemetryDownlink::prioOf(uint8_t msgid1, uint8_t msgid2) {
+    if (msgid1 == static_cast<uint8_t>(DownlinkSubsystem::SYS)) return DownlinkPrio::STATUS;
+    if (msgid1 == static_cast<uint8_t>(DownlinkSubsystem::ARM) &&
+        msgid2 == static_cast<uint8_t>(DownlinkArmMsg::JOINT)) return DownlinkPrio::MOTION;
+    return DownlinkPrio::BULK;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +402,7 @@ void TelemetryDownlink::sendUplinkStats(uint32_t rx_bytes, uint16_t frames_ok,
 void TelemetryDownlink::sendSystem(uint8_t mission_state, uint8_t subsystems,
                                    uint32_t uptime_ms,
                                    uint8_t status1, uint8_t status2,
-                                   uint8_t rexus) {
+                                   uint8_t rexus, uint8_t flight) {
     uint8_t data[DOWNLINK_DATA_SIZE];
     memset(data, 0, sizeof(data));
 
@@ -395,25 +411,48 @@ void TelemetryDownlink::sendSystem(uint8_t mission_state, uint8_t subsystems,
     data[1] = subsystems;
     put_be32(&data[2], static_cast<int32_t>(uptime_ms));
     data[6] = rexus;      // rohe REXUS-Pegel, siehe DL_REXUS_*
-    // data[7] reserved (0)
+    data[7] = flight;     // DL_FLIGHT_* (HDRM, Arm)
 
     sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
               static_cast<uint8_t>(DownlinkSysMsg::STATE),
               0, data, status1, status2);
 }
 
-void TelemetryDownlink::logEvent(uint8_t state, uint8_t prev_state, uint8_t signals,
-                                 uint8_t prev_signals, uint32_t millis_now) {
+void TelemetryDownlink::sendSd(uint8_t status, uint8_t fail, uint32_t written_kb,
+                               uint32_t dropped, uint8_t fill_pct) {
     uint8_t data[DOWNLINK_DATA_SIZE];
     memset(data, 0, sizeof(data));
 
-    data[0] = state;
-    data[1] = prev_state;
-    data[2] = signals;
-    data[3] = prev_signals;
-    put_be32(&data[4], static_cast<int32_t>(millis_now));
+    // DATA: [status fail written_kb(uint32 BE) dropped(uint16 BE, gesaettigt)]
+    data[0] = status;
+    data[1] = fail;
+    putU32(&data[2], written_kb);
+    putU16(&data[6], dropped > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(dropped));
 
-    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::EVENT),
-              static_cast<uint8_t>(DownlinkEventMsg::STATE),
-              0, data, 0, 0, /*sd_only=*/true);
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::SD), 0, data, fill_pct, 0);
+}
+
+void TelemetryDownlink::sendBoot(uint16_t boot_count, uint8_t resets_in_row, uint8_t culprit,
+                                 uint8_t disabled_mask, bool minimal, uint32_t loop_max_us,
+                                 bool after_watchdog) {
+    uint8_t data[DOWNLINK_DATA_SIZE];
+    memset(data, 0, sizeof(data));
+
+    // DATA: [boot_count(uint16 BE) resets culprit disabled minimal loop_max(uint16 BE, 0,1 ms)]
+    putU16(&data[0], boot_count);
+    data[2] = resets_in_row;
+    data[3] = culprit;
+    data[4] = disabled_mask;
+    data[5] = minimal ? 1 : 0;
+    const uint32_t tenth_ms = loop_max_us / 100;
+    putU16(&data[6], tenth_ms > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(tenth_ms));
+
+    // STATUS2: seit dem letzten SYS/BOOT verworfene Downlink-Frames.
+    const uint32_t lost = uart_dropped_ - uart_dropped_reported_;
+    uart_dropped_reported_ = uart_dropped_;
+
+    sendFrame(static_cast<uint8_t>(DownlinkSubsystem::SYS),
+              static_cast<uint8_t>(DownlinkSysMsg::BOOT), 0, data,
+              after_watchdog ? 1 : 0, lost > 0xFF ? 0xFF : static_cast<uint8_t>(lost));
 }

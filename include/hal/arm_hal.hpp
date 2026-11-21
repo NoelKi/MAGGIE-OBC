@@ -102,6 +102,14 @@ enum class ArmMsg : uint8_t {
     RCU_FREEFALL_EVENT   = 0x1B,   ///< ohne Payload
 };
 
+/// Art eines Frames fuer den Mithoerer (ArmLink::setTap).
+enum class ArmTapKind : uint8_t {
+    RX         = 0,   ///< von der RCU empfangen, CRC ok
+    TX         = 1,   ///< an die RCU gesendet
+    RX_BAD_CRC = 2,   ///< Kandidat mit falscher CRC (Bytes inkl. CRC)
+    RX_BAD_ID  = 3,   ///< Kandidat mit unbekannter ID (nur der Kopf)
+};
+
 /// Letzter Stand eines Gelenks. age = millis() - updated_ms.
 struct ArmJoint {
     // JOINT_STATE
@@ -176,6 +184,9 @@ public:
     uint32_t lastFrameMs()   const { return last_frame_ms_; }
     uint16_t framesOk()      const { return frames_ok_; }
     uint16_t framesBad()     const { return frames_bad_; }   ///< CRC-Fehler + unbekannte IDs
+    uint32_t crcErrors()     const { return crc_errors_; }   ///< davon: CRC falsch
+    uint32_t unknownIds()    const { return unknown_ids_; }  ///< davon: ID unbekannt
+    uint32_t framesOkTotal() const { return frames_ok_total_; }
     uint8_t  lastMsg()       const { return last_msg_; }
     uint8_t  lastNode()      const { return last_node_; }
     uint8_t  freefallCount() const { return freefall_count_; }
@@ -188,7 +199,19 @@ public:
     /// Payload-Laenge einer ID, -1 wenn unbekannt.
     static int payloadSize(uint8_t msg_id);
 
+    /**
+     * @brief Mithoerer fuer jedes Frame (z.B. die SD-Karte).
+     *
+     * RX/TX: gueltiges Frame, Kopf + Payload OHNE CRC. RX_BAD_*: verworfener
+     * Kandidat mit den Rohbytes (Diagnose). Darf nicht blockieren.
+     */
+    using FrameTap = void (*)(void* ctx, ArmTapKind kind, const uint8_t* frame, uint8_t len);
+    void setTap(FrameTap tap, void* ctx) { tap_ = tap; tap_ctx_ = ctx; }
+
 private:
+    FrameTap tap_     = nullptr;
+    void*    tap_ctx_ = nullptr;
+
     HardwareSerial& serial_;
     bool initialized_ = false;
 
@@ -202,6 +225,9 @@ private:
     bool     ever_received_  = false;
     uint16_t frames_ok_      = 0;
     uint16_t frames_bad_     = 0;
+    uint32_t crc_errors_     = 0;
+    uint32_t unknown_ids_    = 0;
+    uint32_t frames_ok_total_ = 0;
     uint8_t  last_msg_       = 0;
     uint8_t  last_node_      = 0;
     uint8_t  freefall_count_ = 0;

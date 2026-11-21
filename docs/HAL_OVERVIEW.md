@@ -8,7 +8,9 @@ the source of truth for pins is `include/pin_config.hpp`, for wire formats
 ## Structure
 
 ```
-src/main.cpp              setup()/loop(), hardware watchdog
+src/main.cpp              setup()/loop()
+src/boot_guard.cpp        hardware watchdog, hang breadcrumbs, reset-loop guard
+src/obc_log.cpp           Log: debug output to USB and to the SD card (LOG.txt)
 src/system.cpp            System: owns every module, runs the loop
 src/statemachine/         ground and flight states
 src/storage/              persistent state (EEPROM), SD-card log
@@ -39,33 +41,40 @@ Up- and downlink share one UART (`Serial4`) to the REXUS service module (RXSM).
 The robot arm has its own UART (`Serial1`). `extern/lisa-if/` is the Python
 reference parser for that protocol (a copy, see `extern/README.md`); it is not
 part of the build.
-USB `Serial` (115200) is for log output only.
+USB `Serial` (115200) is for log output only. Firmware code prints through
+`Log` (`include/obc_log.hpp`), which writes to USB and copies every line to
+the SD card.
 
 ## Main loop and data rates
 
 Everything runs cooperatively from `System::run()`; there is no RTOS. All rates
 live in `include/data_rates.hpp`.
 
-| When | What | Frame (MSGID1/MSGID2) |
-|---|---|---|
-| every loop | telecommands, REXUS signals, state machine, flight actions | – |
-| every loop | motor `update()`, 30 s run-time limit | – |
-| per HX711 conversion (80 Hz, set by the RATE pin) | force 1 + 2, or 1/s with `STALE` while a sensor hangs | `04/01`, `04/02` |
-| 10 ms (100 Hz) | IMU accel + gyro (BMI088 runs at 400 Hz internally) | `01/01`, `01/02` |
-| 50 ms (20 Hz) | motor 1 + 2 position, PWM, flags | `02/01`, `02/02` |
-| 1 s | state, subsystem bits, uptime, REXUS levels, uplink statistics | `03/01`–`03/03` |
-| 200 ms (5 Hz) | arm: joint state + angle, only joints with a new value | `05/01` |
-| 200 ms (5 Hz) | arm: RCU IMU accel + gyro, throttled from ~104 Hz | `05/04`, `05/05` |
-| 1 s | arm: voltage and temperature per joint, only new values | `05/02`, `05/03` |
-| 1 s | arm link statistics (priority lane, like all SYS frames) | `03/04` |
-| on change | state or SODS/LO/SOE, ms-exact, **SD card only** | `10/01` |
-| every loop | SD card: at most one write, never while a motor runs | – |
+Downlink in three tiers (user decision, 19.11.2026; `DownlinkPrio`, limits in
+`data_rates.hpp`):
 
-About 8 KB/s in total. Every frame goes to the SD card. It also goes to the
-downlink UART if the UART's send buffer has room; otherwise it is dropped for
-the downlink only (the ground sees a counter gap) and the loop never waits.
-At 38400 baud (~3.8 KB/s) only about half the frames fit; the RXSM link needs
->= 115200 baud for all of them (`rates::DOWNLINK_BAUDRATE`).
+| Tier | When | What | Frame (MSGID1/MSGID2) |
+|---|---|---|---|
+| 1 STATUS | 500 ms + on every state change | state, subsystems, REXUS levels, HDRM/arm flight flags (DATA[7]), live bits: arm link, SD, flight switch, minimal mode, cameras 1–4 (STATUS2) | `03/01` |
+| 1 STATUS | one slot every 125 ms, each frame 1 Hz | uplink stats + raw, arm link, arm trajectory, flight trajectory, cameras + camera info, SD card, boot/watchdog | `03/02`–`03/0A` |
+| 2 MOTION | one joint every 25 ms (each 5 Hz), only new values | arm joint state + angle | `05/01` |
+| 3 BULK | `DL_IMU_INTERVAL_MS` (20 Hz) | IMU accel + gyro | `01/01`, `01/02` |
+| 3 BULK | `DL_FORCE_INTERVAL_MS` (10 Hz each), or 1/s with `STALE` | force 1 + 2 | `04/01`, `04/02` |
+| 3 BULK | `DL_MOTOR_INTERVAL_MS` (10 Hz) | motor 1 + 2 position, PWM, flags | `02/01`, `02/02` |
+| 3 BULK | `ARM_IMU_INTERVAL_MS` (2 Hz) | RCU IMU accel + gyro | `05/04`, `05/05` |
+| 3 BULK | one frame every 62 ms (each 1 Hz) | arm voltage, arm temperature per joint | `05/02`, `05/03` |
+
+Rates are for 38400 baud (~3.8 KB/s, ~75 % load). Tier 1 may use the whole
+UART buffer, tier 2 up to 80 ms of queue, tier 3 up to 60 ms; tiers 2 and 3
+always leave `DL_STATUS_RESERVE` free for tier 1. A frame that does not fit is
+dropped for the downlink only (counted per tier in `SYS.csv`); the loop never
+waits. Nothing is sent in bursts, so no tier blocks another. Changing
+`DOWNLINK_BAUDRATE` scales the tier-3 rates and queue limits automatically
+(`DL_SPEED`). `tools/downlink_sim/run.sh` checks 38400 and 115200 baud: tiers 1
+and 2 lose nothing, every tier-3 type arrives at its full rate.
+
+The SD card does not take downlink frames. It gets every value straight from
+its source (see "On-board storage").
 
 ## State machine
 
@@ -151,27 +160,46 @@ Counterpart on the ground: `MAGGIE_SERVER/app/routes/command.py`.
 | What | Where | Survives |
 |---|---|---|
 | Mission state, flight time, HDRM progress, boot counter | EEPROM emulation in flash (`PersistentState`) | reset, power loss, reflash |
-| Every downlink frame | SD card, `/B<boot>/F<n>.BIN` (`SdLogger`) | power loss, except the open file |
+| Everything (see below) | SD card, CSV files (`SdLogger`) | power loss, except the last ~2 s |
 
-- SD files hold the 20-byte frames back to back, the same format as the
-  downlink, plus the SD-only event frames. A new file starts every 10 s.
-  `MAGGIE-SERVER/tools/sd_to_csv.py` turns a card into CSV files with a
-  timeline zeroed at SODS.
-- Frames go into a 256 KB RAM buffer (~30 s of telemetry) first. The card is
-  written in 512-byte chunks, one operation per loop, and not at all while a
-  motor runs (card busy times of 100–250 ms would overshoot a turn).
-- Any SD error switches logging off until the next boot. If a watchdog reset
-  happened inside an SD call (marker in `SNVS_LPGPR0`), the card stays off for
-  that boot instead of causing a reset loop.
+- Layout: `/MAGGIE/<date>/<HHMMSS>_B<boot>/` with `INFO.txt`, `LOG.txt`,
+  `EVENTS.csv`, `SYS.csv`, `IMU.csv`, `FORCE_T1.csv`, `FORCE_T2.csv`,
+  `MOTOR.csv`, `ARM_JOINTS.csv`, `ARM_MODULE_IMU.csv`, `ARM_POWER.csv`,
+  `ARM_RCU_IMU.csv`, `ARM_RAW.csv`, `CAMERA.csv`. `/MAGGIE/LIESMICH.TXT`
+  describes every column. Each CSV starts with `t_s` (seconds since boot) and
+  `zustand` (mission state). The date comes from the Teensy RTC, which without
+  a coin cell restarts at the firmware build time after a power loss.
+- Content: IMU 100 Hz incl. chip temperature, every force conversion with full
+  24-bit counts, both motors at 100 Hz, every valid RCU frame in both
+  directions (decoded into joints, module IMU, voltages/temperatures, RCU IMU,
+  plus raw), cameras and a system overview at 1 Hz, state changes, REXUS
+  signals, every telecommand (accepted or rejected), warnings, and the
+  complete debug log.
+- Values go as compact binary records into a 256 KB RAM ring first
+  (`push*()`, never touches the card). `service()` turns them into text
+  (per-file 2 KB buffers) and does at most one card operation per loop: create
+  a folder/file, write 512 bytes, or sync one file. Files stay open and each is
+  synced every 2 s. Nothing touches the card while a motor runs.
+- The card is switched off until the next boot on any error, after one
+  operation slower than 600 ms, or after three slower than 150 ms within 30 s.
+  `tools/sd_sim/run.sh` tests all of this on the PC against a fake card.
 - Flash writes block interrupts (µs normally, 45–400 ms for a rare sector
   erase), so EEPROM is written only at boot and on state changes.
 
 ## Safety mechanisms
 
-- **Hardware watchdog** (WDOG1, 1 s). A hung loop resets the chip. After the
-  reset the motor pins are undriven (DRV8871 coasts) and the OBC starts in
-  PRE_LAUNCH with actuators locked. The ground sees the reset as uptime
-  dropping back.
+- **Hardware watchdog** (WDOG1, `boot_guard.hpp`). Starts first thing in
+  `setup()` with 5 s, so a hang during init also resets; 1 s in the loop. After
+  the reset the motor pins are undriven (DRV8871 coasts) and the OBC restores
+  its state with actuators locked.
+- **Hang breadcrumbs.** Before each section that could hang, the current stage
+  is written to `SNVS_LPGPR0` (survives a watchdog reset). After a watchdog
+  reset the guilty optional subsystem (SD, IMU, force, cameras, arm UART)
+  stays off for that boot instead of hanging again.
+- **Reset-loop guard.** `SNVS_LPGPR1` counts watchdog resets in a row (cleared
+  after 60 s of stable running). From 3 on, the OBC starts in minimal mode:
+  SD card, cameras and force sensors off. State machine, uplink, downlink,
+  motors, IMU and arm keep running. `SYS/BOOT` shows all of this on the ground.
 - **No blocking calls in the loop.** Force tare is spread over the loop;
   downlink writes go into a buffer.
 - **Actuator lock.** Motor commands other than OFF only run in TEST. From LO

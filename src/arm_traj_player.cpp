@@ -1,7 +1,19 @@
 #include "arm_traj_player.hpp"
+#include "obc_log.hpp"
 #include "arm_test_trajectory.hpp"
 #include <Arduino.h>
 #include <math.h>
+
+namespace {
+/// Vergangene Zeit seit t, nie "negativ": Wurde t mit millis() SPAETER im
+/// selben Loop gesetzt als now_ms (start() mit millis(), update() mit dem
+/// Loop-Zeitpunkt), ergaebe now_ms - t als uint32_t ~4 Mrd. ms - die
+/// Haltephase waere sofort vorbei gewesen.
+inline uint32_t since(uint32_t now_ms, uint32_t t) {
+    const int32_t d = static_cast<int32_t>(now_ms - t);
+    return d > 0 ? static_cast<uint32_t>(d) : 0;
+}
+}  // namespace
 
 static_assert(ARM_TRAJ_JOINTS >= 1 && ARM_TRAJ_JOINTS <= ArmTrajPlayer::MAX_JOINTS,
               "Tabelle hat mehr Gelenke als der Player abspielen darf");
@@ -28,28 +40,28 @@ bool ArmTrajPlayer::checkTable() {
     // Das Skript prueft dasselbe - hier noch einmal, falls jemand die
     // Tabelle von Hand aendert. Lieber nicht starten als falsch fahren.
     if (ARM_TRAJ_LEN < 2 || ARM_TRAJ_DT_MS != 100) {
-        Serial.println("WARN  [ArmTraj]: Tabelle leer oder Takt nicht 100 ms - nicht gestartet.");
+        Log.println("WARN  [ArmTraj]: Tabelle leer oder Takt nicht 100 ms - nicht gestartet.");
         return false;
     }
     const int32_t max_urad = degToUrad(MAX_DEG);
     const int32_t max_step = degToUrad(MAX_VEL_DEG_S * ARM_TRAJ_DT_MS / 1000.0f);
     for (uint8_t c = 0; c < ARM_TRAJ_JOINTS; c++) {
         if (offsetAt(0, c) != 0 || offsetAt(ARM_TRAJ_LEN - 1, c) != 0) {
-            Serial.printf("WARN  [ArmTraj]: Spalte %u beginnt/endet nicht bei 0 (Start = Ende) - "
+            Log.printf("WARN  [ArmTraj]: Spalte %u beginnt/endet nicht bei 0 (Start = Ende) - "
                           "nicht gestartet.\n", c + 1);
             return false;
         }
         for (uint16_t i = 0; i < ARM_TRAJ_LEN; i++) {
             const int32_t o = offsetAt(i, c);
             if (o > max_urad || o < -max_urad) {
-                Serial.printf("WARN  [ArmTraj]: Spalte %u Punkt %u (%.2f Grad) ausserhalb +-%.0f Grad - "
+                Log.printf("WARN  [ArmTraj]: Spalte %u Punkt %u (%.2f Grad) ausserhalb +-%.0f Grad - "
                               "nicht gestartet.\n", c + 1, i, uradToDeg(o), MAX_DEG);
                 return false;
             }
             if (i > 0) {
                 const int32_t d = o - offsetAt(i - 1, c);
                 if (d > max_step || d < -max_step) {
-                    Serial.printf("WARN  [ArmTraj]: Spalte %u Schritt %u zu schnell (%.1f Grad/s > %.0f) - "
+                    Log.printf("WARN  [ArmTraj]: Spalte %u Schritt %u zu schnell (%.1f Grad/s > %.0f) - "
                                   "nicht gestartet.\n", c + 1, i,
                                   uradToDeg(d) * 1000.0f / ARM_TRAJ_DT_MS, MAX_VEL_DEG_S);
                     return false;
@@ -71,7 +83,7 @@ bool ArmTrajPlayer::uses(uint8_t node) const {
 bool ArmTrajPlayer::start(ArmLink& arm, const uint8_t* nodes, uint8_t count, uint32_t now_ms) {
     if (active()) {
         // Laufende Fahrt nicht anfassen - auch nicht ihren Status.
-        Serial.println("WARN  [ArmTraj]: laeuft bereits - nicht gestartet.");
+        Log.println("WARN  [ArmTraj]: laeuft bereits - nicht gestartet.");
         return false;
     }
     if (runs_ < 0xFF) runs_++;
@@ -79,25 +91,25 @@ bool ArmTrajPlayer::start(ArmLink& arm, const uint8_t* nodes, uint8_t count, uin
     max_err_deg_ = 0.0f;
 
     if (count != ARM_TRAJ_JOINTS) {
-        Serial.printf("WARN  [ArmTraj]: %u Gelenk(e) angegeben, Tabelle hat %u Spalte(n) - nicht gestartet.\n",
+        Log.printf("WARN  [ArmTraj]: %u Gelenk(e) angegeben, Tabelle hat %u Spalte(n) - nicht gestartet.\n",
                       count, ARM_TRAJ_JOINTS);
         return refuse();
     }
     if (!checkTable()) return refuse();
     if (!arm.linkAlive(now_ms)) {
-        Serial.println("WARN  [ArmTraj]: RCU-Link tot - nicht gestartet.");
+        Log.println("WARN  [ArmTraj]: RCU-Link tot - nicht gestartet.");
         return refuse();
     }
 
     for (uint8_t k = 0; k < count; k++) {
         ArmJoint* j = arm.joint(nodes[k]);
         if (!j || !j->seen) {
-            Serial.printf("WARN  [ArmTraj]: Gelenk %u meldet keinen Winkel - nicht gestartet.\n", nodes[k]);
+            Log.printf("WARN  [ArmTraj]: Gelenk %u meldet keinen Winkel - nicht gestartet.\n", nodes[k]);
             return refuse();
         }
         for (uint8_t m = 0; m < k; m++) {
             if (nodes[m] == nodes[k]) {
-                Serial.printf("WARN  [ArmTraj]: Gelenk %u doppelt angegeben - nicht gestartet.\n", nodes[k]);
+                Log.printf("WARN  [ArmTraj]: Gelenk %u doppelt angegeben - nicht gestartet.\n", nodes[k]);
                 return refuse();
             }
         }
@@ -112,7 +124,7 @@ bool ArmTrajPlayer::start(ArmLink& arm, const uint8_t* nodes, uint8_t count, uin
     for (uint8_t k = 0; k < count_; k++) {
         if (!arm.sendCommand(joints_[k].node, ArmMsg::RELEASE) ||
             !sendTarget(arm, joints_[k], 0, SLOW_VEL_DEG_S)) {
-            Serial.println("WARN  [ArmTraj]: TX-Puffer voll - nicht gestartet.");
+            Log.println("WARN  [ArmTraj]: TX-Puffer voll - nicht gestartet.");
             for (uint8_t m = 0; m < count_; m++) arm.sendCommand(joints_[m].node, ArmMsg::STOP);
             result_ = Result::TX_FULL;
             result_node_ = joints_[k].node;
@@ -127,10 +139,10 @@ bool ArmTrajPlayer::start(ArmLink& arm, const uint8_t* nodes, uint8_t count, uin
     phase_ms_    = now_ms;
     last_log_ms_ = now_ms;
     for (uint8_t k = 0; k < count_; k++) {
-        Serial.printf("INFO  [ArmTraj]: Spalte %u -> Gelenk %u, Start bei %.2f Grad.\n",
+        Log.printf("INFO  [ArmTraj]: Spalte %u -> Gelenk %u, Start bei %.2f Grad.\n",
                       k + 1, joints_[k].node, uradToDeg(joints_[k].base_urad));
     }
-    Serial.printf("INFO  [ArmTraj]: Start, %u Punkte (%.1f s), Bereich +-%.0f Grad, max %.0f Grad/s.\n",
+    Log.printf("INFO  [ArmTraj]: Start, %u Punkte (%.1f s), Bereich +-%.0f Grad, max %.0f Grad/s.\n",
                   ARM_TRAJ_LEN, ARM_TRAJ_LEN * ARM_TRAJ_DT_MS / 1000.0f, MAX_DEG, MAX_VEL_DEG_S);
     return true;
 }
@@ -182,10 +194,10 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
                 return;
             }
         }
-        if (now_ms - phase_ms_ >= SETTLE_MS) {
+        if (since(now_ms, phase_ms_) >= SETTLE_MS) {
             setPhase(Phase::RUN);
             phase_ms_ = now_ms;
-            Serial.println("INFO  [ArmTraj]: Gelenke halten, Trajektorie laeuft.");
+            Log.println("INFO  [ArmTraj]: Gelenke halten, Trajektorie laeuft.");
         }
         return;
     }
@@ -203,7 +215,7 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
             Joint& j = joints_[k];
             if (err[k] > TRACK_ERR_DEG) {
                 if (j.track_err_since_ms == 0) j.track_err_since_ms = now_ms;
-                if (now_ms - j.track_err_since_ms >= TRACK_ERR_MS) {
+                if (since(now_ms, j.track_err_since_ms) >= TRACK_ERR_MS) {
                     abort(arm, "Schleppfehler zu gross", j.node, Result::TRACK_ERROR);
                     return;
                 }
@@ -223,7 +235,7 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
             }
             setPhase(Phase::FINISH);
             phase_ms_ = now_ms;
-            Serial.println("INFO  [ArmTraj]: Tabelle durch, Gelenke fahren auf den Startwinkel.");
+            Log.println("INFO  [ArmTraj]: Tabelle durch, Gelenke fahren auf den Startwinkel.");
             return;
         }
 
@@ -244,14 +256,14 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
             }
         }
 
-        if (now_ms - last_log_ms_ >= 1000) {
+        if (since(now_ms, last_log_ms_) >= 1000) {
             last_log_ms_ = now_ms;
-            Serial.printf("INFO  [ArmTraj]: t=%.1f s", (now_ms - phase_ms_) / 1000.0f);
+            Log.printf("INFO  [ArmTraj]: t=%.1f s", (now_ms - phase_ms_) / 1000.0f);
             for (uint8_t k = 0; k < count_; k++) {
-                Serial.printf(" | G%u soll %+.2f ist %+.2f (Fehler %.2f)", joints_[k].node,
+                Log.printf(" | G%u soll %+.2f ist %+.2f (Fehler %.2f)", joints_[k].node,
                               uradToDeg(offsetAt(step, k)), actual[k], err[k]);
             }
-            Serial.println();
+            Log.println();
         }
         return;
     }
@@ -262,25 +274,25 @@ void ArmTrajPlayer::update(ArmLink& arm, uint32_t now_ms) {
         if (fabsf(actual[k]) > DONE_TOL_DEG) all_done = false;
     }
     if (all_done) {
-        Serial.print("INFO  [ArmTraj]: fertig - Gelenke wieder am Startwinkel (Abweichung");
+        Log.print("INFO  [ArmTraj]: fertig - Gelenke wieder am Startwinkel (Abweichung");
         for (uint8_t k = 0; k < count_; k++) {
-            Serial.printf(" G%u %+.2f", joints_[k].node, actual[k]);
+            Log.printf(" G%u %+.2f", joints_[k].node, actual[k]);
         }
-        Serial.println(" Grad).");
+        Log.println(" Grad).");
         finish(Result::DONE, 0);
         return;
     }
     // Weitester Rueckweg + Anfahren/Abbremsen mit ACCEL + Reserve.
     const uint32_t timeout_ms = static_cast<uint32_t>(
         (MAX_DEG / SLOW_VEL_DEG_S + 2.0f * SLOW_VEL_DEG_S / ACCEL_DEG_S2) * 1000.0f) + 3000;
-    if (now_ms - phase_ms_ > timeout_ms) {
+    if (since(now_ms, phase_ms_) > timeout_ms) {
         abort(arm, "Startwinkel nicht erreicht", 0, Result::FINISH_TIMEOUT);
     }
 }
 
 void ArmTrajPlayer::abort(ArmLink& arm, const char* reason, uint8_t node, Result r) {
-    if (node) Serial.printf("WARN  [ArmTraj]: Abbruch (Gelenk %u: %s). STOP + INHIBIT.\n", node, reason);
-    else      Serial.printf("WARN  [ArmTraj]: Abbruch (%s). STOP + INHIBIT.\n", reason);
+    if (node) Log.printf("WARN  [ArmTraj]: Abbruch (Gelenk %u: %s). STOP + INHIBIT.\n", node, reason);
+    else      Log.printf("WARN  [ArmTraj]: Abbruch (%s). STOP + INHIBIT.\n", reason);
     // Erst alle anhalten, dann alle sperren - STOP ist das Dringende.
     for (uint8_t k = 0; k < count_; k++) arm.sendCommand(joints_[k].node, ArmMsg::STOP);
     for (uint8_t k = 0; k < count_; k++) arm.sendCommand(joints_[k].node, ArmMsg::INHIBIT);
@@ -289,7 +301,7 @@ void ArmTrajPlayer::abort(ArmLink& arm, const char* reason, uint8_t node, Result
 
 bool ArmTrajPlayer::cancel(const char* reason) {
     if (!active()) return false;
-    Serial.printf("INFO  [ArmTraj]: beendet - %s.\n", reason);
+    Log.printf("INFO  [ArmTraj]: beendet - %s.\n", reason);
     finish(Result::CANCELLED, 0);
     return true;
 }

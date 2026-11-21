@@ -90,6 +90,7 @@ struct CameraStatus {
     uint16_t probes_failed   = 0;      ///< Abfragen ohne (gueltige) Antwort
     // Diagnose (seit dem Start): kommt ueberhaupt etwas zurueck?
     bool     rx_any          = false;  ///< irgendein Byte auf eine Abfrage empfangen
+    uint32_t last_rx_ms      = 0;      ///< millis() der letzten Bytes auf eine Abfrage
     bool     rx_garbage      = false;  ///< Bytes empfangen, aber keine gueltige Antwort
                                        ///< (Baudrate? Protokoll? Stoerung?)
 };
@@ -106,7 +107,10 @@ public:
     static constexpr uint32_t CAM_TX_GAP_MS           = 5;
     /// Jede Kamera wird reihum abgefragt, alle CAM_PROBE_PERIOD_MS eine.
     static constexpr uint32_t CAM_PROBE_PERIOD_MS     = 1000;
-    /// Kamera gilt als "antwortet", wenn die letzte Antwort juenger ist.
+    /// Kamera gilt als "an", wenn die letzte Antwort - oder wenigstens irgendein
+    /// Byte auf eine Abfrage - juenger ist. Beim Aufnehmen kommen ~70 % der
+    /// Antworten verstuemmelt an (Bodentest 20.11.2026); Bytes heissen aber
+    /// sicher: Strom da, Kamera laeuft. Rohbytes: logFailedProbe().
     static constexpr uint32_t CAM_ALIVE_MS            = 10000;
 
     CameraHAL(HardwareSerial& serial, uint8_t pin_sel_a, uint8_t pin_sel_b);
@@ -155,6 +159,16 @@ private:
     uint8_t  rx_[8] = {};
     uint8_t  rx_len_ = 0;
     uint16_t job_rx_bytes_ = 0;      ///< Bytes waehrend der laufenden Abfrage
+    // Diagnose: Rohbytes einer fehlgeschlagenen Abfrage ins Log (gedrosselt).
+    static constexpr uint8_t  DIAG_BYTES       = 24;
+    static constexpr uint8_t  DIAG_FREE_LOGS   = 12;      ///< so viele pro Start ungebremst
+    static constexpr uint32_t DIAG_INTERVAL_MS = 60000;   ///< danach hoechstens eine pro Minute
+    uint8_t  diag_[DIAG_BYTES] = {};
+    uint8_t  diag_len_   = 0;
+    uint8_t  diag_logged_ = 0;
+    uint32_t diag_last_ms_ = 0;
+    uint32_t job_start_ms_ = 0;
+    void logFailedProbe(uint32_t now_ms);
 
     bool pickJob(uint32_t now_ms);
     void select(uint8_t channel);
